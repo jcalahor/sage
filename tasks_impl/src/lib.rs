@@ -1,8 +1,8 @@
-use task::{SageTask, SageTaskRequest};
 use async_trait::async_trait;
+use task::{SageTask, SageTaskRequest};
 
 pub struct SampleRequest {
-    pub i: i64
+    pub i: i64,
 }
 impl SageTaskRequest for SampleRequest {}
 

@@ -1,13 +1,12 @@
 use async_trait::async_trait;
+use std::any::Any;
 
-pub trait SageTaskRequest {}
+pub trait SageTaskRequest: Any {}
 
 #[async_trait]
 pub trait SageTask<T: SageTaskRequest> {
     async fn run(&self, request: &T) -> Result<(), Box<dyn std::error::Error + Send>>;
 }
-
-
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

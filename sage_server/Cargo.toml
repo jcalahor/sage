@@ -4,6 +4,3 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-task = { path = "../task" }
-tasks_impl = { path = "../tasks_impl" }
-tokio = { version = "1", features = ["full"] }
