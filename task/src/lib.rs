@@ -1,7 +1,14 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 
-pub trait SageTaskRequest: Any {}
+pub trait SageTaskRequest: Any + Send + Sync {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SageMessage {
+    pub task_name: String,
+    pub task_context: String,
+}
 
 #[async_trait]
 pub trait SageTask<T: SageTaskRequest> {

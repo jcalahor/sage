@@ -5,15 +5,8 @@ import time
 import random
 
 input_data = [
-    {"Symbol": "IBM", "Price": 102.3},
-    {"Symbol": "MSFT", "Price": 10.3},
-    {"Symbol": "GOOG", "Price": 1002.3},
-    {"Symbol": "META", "Price": 299.3},
-    {"Symbol": "XYZ", "Price": 211.3},
-    {"Symbol": "NVDA", "Price": 112.3},
-    {"Symbol": "APPL", "Price": 233.3},
-    {"Symbol": "LKM", "Price": 11.3},
-    {"Symbol": "UTC", "Price": 33.3},
+    {"task_name": "PrimeTask", "task_context": "{\"limit\":45000}"},
+    {"task_name": "PrimeTask", "task_context": "{\"limit\":35000}"},
 ]
 
 
