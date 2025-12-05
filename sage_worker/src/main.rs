@@ -7,9 +7,10 @@ use std::error::Error;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use task::{SageMessage, SageTask, SageTaskRequest};
+use task::{SageMessage, SageTask, SageTaskRequest, SageTaskResponse};
 use tasks_impl::PrimeTask;
 use tasks_impl::PrimeTaskRequest;
+use tasks_impl::PrimeTaskResponse;
 use tasks_impl::SampleTask;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -17,7 +18,7 @@ use tokio::sync::mpsc::Sender;
 async fn run_task(
     task_name: &str,
     request: &dyn SageTaskRequest,
-) -> Result<(), Box<dyn std::error::Error + Send>> {
+) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>> {
     // Downcast the trait object to concrete type
 
     match task_name {
@@ -31,7 +32,8 @@ async fn run_task(
                     ))
                 })?;
             let task = SampleTask {};
-            task.run(concrete_request).await?;
+            let response: Box<dyn SageTaskResponse> = task.run(concrete_request).await?;
+            return Ok(response);
         }
         "PrimeTask" => {
             let concrete_request = (request as &dyn Any)
@@ -43,12 +45,16 @@ async fn run_task(
                     ))
                 })?;
             let task = PrimeTask {};
-            task.run(concrete_request).await?;
+            let response: Box<dyn SageTaskResponse> = task.run(concrete_request).await?;
+            return Ok(response);
         }
-        _ => {}
+        _ => {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Task not found",
+            )));
+        }
     };
-
-    Ok(())
 }
 
 fn get_context(
@@ -64,6 +70,42 @@ fn get_context(
             let request: PrimeTaskRequest = serde_json::from_str(&message.task_context)
                 .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
             Ok(Box::new(request))
+        }
+        _ => Err(Box::new(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Unknown task name: {}", message.task_name),
+        ))),
+    }
+}
+
+fn submit_response(
+    message: &SageMessage,
+    response: Box<dyn SageTaskResponse>,
+) -> Result<(), Box<dyn std::error::Error + Send>> {
+    match message.task_name.as_str() {
+        "SampleTask" => {
+            let concrete_response = (response.as_ref() as &dyn Any)
+                .downcast_ref::<PrimeTaskResponse>()
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send> {
+                    Box::new(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Failed to downcast response",
+                    ))
+                })?;
+            println!("SampleTask Response: {:?}", concrete_response);
+            Ok(())
+        }
+        "PrimeTask" => {
+            let concrete_response = (response.as_ref() as &dyn Any)
+                .downcast_ref::<PrimeTaskResponse>()
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send> {
+                    Box::new(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Failed to downcast response",
+                    ))
+                })?;
+            println!("PrimeTask Response: {:?}", concrete_response);
+            Ok(())
         }
         _ => Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -94,8 +136,11 @@ async fn main() {
                     Ok(request) => {
                         // Use the task_name from the message to run the appropriate task
                         match run_task(&res.task_name, request.as_ref()).await {
-                            Ok(()) => {
+                            Ok(response) => {
                                 println!("Task '{}' completed successfully", res.task_name);
+                                if let Err(e) = submit_response(&res, response) {
+                                    eprintln!("Failed to submit response: {}", e);
+                                }
                             }
                             Err(error) => {
                                 eprintln!("Task '{}' failed: {}", res.task_name, error);
@@ -111,8 +156,6 @@ async fn main() {
     });
 
     // Run sample tasks once
-    let request: PrimeTaskRequest = PrimeTaskRequest { limit: 20 };
-
     // Keep the application running to continue consuming messages
     println!("Worker running, press Ctrl+C to exit...");
     tokio::signal::ctrl_c()

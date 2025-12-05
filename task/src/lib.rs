@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 
 pub trait SageTaskRequest: Any + Send + Sync {}
+pub trait SageTaskResponse: Any + Send + Sync {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SageMessage {
@@ -12,11 +13,10 @@ pub struct SageMessage {
 
 #[async_trait]
 pub trait SageTask<T: SageTaskRequest> {
-    async fn run(&self, request: &T) -> Result<(), Box<dyn std::error::Error + Send>>;
-}
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+    async fn run(
+        &self,
+        request: &T,
+    ) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>>;
 }
 
 #[cfg(test)]
@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+        //let result = add(2, 2);
+        //sassert_eq!(result, 4);
     }
 }

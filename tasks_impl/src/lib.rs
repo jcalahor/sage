@@ -2,13 +2,19 @@ use async_trait::async_trait;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use task::{SageTask, SageTaskRequest};
+use task::{SageTask, SageTaskRequest, SageTaskResponse};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PrimeTaskRequest {
     pub limit: u64,
 }
 impl SageTaskRequest for PrimeTaskRequest {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PrimeTaskResponse {
+    pub prime_founds: u64,
+}
+impl SageTaskResponse for PrimeTaskResponse {}
 
 pub struct SampleTask {}
 pub struct PrimeTask {}
@@ -18,9 +24,9 @@ impl SageTask<PrimeTaskRequest> for SampleTask {
     async fn run(
         &self,
         request: &PrimeTaskRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send>> {
+    ) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>> {
         println!("Running task with request value: {}", request.limit);
-        Ok(())
+        Ok(Box::new(PrimeTaskResponse { prime_founds: 0 }))
     }
 }
 
@@ -49,7 +55,7 @@ impl SageTask<PrimeTaskRequest> for PrimeTask {
     async fn run(
         &self,
         request: &PrimeTaskRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send>> {
+    ) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>> {
         let start = Instant::now();
         let primes_par: Vec<u64> = (2..=request.limit)
             .into_par_iter()
@@ -62,6 +68,8 @@ impl SageTask<PrimeTaskRequest> for PrimeTask {
             duration_par,
             request.limit
         );
-        Ok(())
+        Ok(Box::new(PrimeTaskResponse {
+            prime_founds: primes_par.len() as u64,
+        }))
     }
 }
