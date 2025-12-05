@@ -130,28 +130,66 @@ async fn main() {
 
     tokio::task::spawn(async move {
         while let Some(res) = rx.recv().await {
-            // Spawn a separate task for each message to allow concurrent processing
-            tokio::task::spawn(async move {
-                match get_context(&res) {
-                    Ok(request) => {
-                        // Use the task_name from the message to run the appropriate task
-                        match run_task(&res.task_name, request.as_ref()).await {
-                            Ok(response) => {
-                                println!("Task '{}' completed successfully", res.task_name);
-                                if let Err(e) = submit_response(&res, response) {
-                                    eprintln!("Failed to submit response: {}", e);
+            // Determine if the task is CPU-intensive and needs spawn_blocking
+            let is_cpu_intensive = matches!(res.task_name.as_str(), "PrimeTask");
+
+            if is_cpu_intensive {
+                // Spawn blocking for CPU-intensive tasks
+                tokio::task::spawn_blocking(move || {
+                    // Use a new runtime to run the async task in blocking context
+                    let runtime = tokio::runtime::Handle::current();
+                    runtime.block_on(async move {
+                        match get_context(&res) {
+                            Ok(request) => {
+                                // Use the task_name from the message to run the appropriate task
+                                match run_task(&res.task_name, request.as_ref()).await {
+                                    Ok(response) => {
+                                        println!(
+                                            "Task '{}' completed successfully (spawn_blocking)",
+                                            res.task_name
+                                        );
+                                        if let Err(e) = submit_response(&res, response) {
+                                            eprintln!("Failed to submit response: {}", e);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        eprintln!("Task '{}' failed: {}", res.task_name, error);
+                                    }
                                 }
                             }
-                            Err(error) => {
-                                eprintln!("Task '{}' failed: {}", res.task_name, error);
+                            Err(e) => {
+                                eprintln!("Failed to unpack context: {}", e);
                             }
                         }
+                    })
+                });
+            } else {
+                // Regular spawn for async tasks
+                tokio::task::spawn(async move {
+                    match get_context(&res) {
+                        Ok(request) => {
+                            // Use the task_name from the message to run the appropriate task
+                            match run_task(&res.task_name, request.as_ref()).await {
+                                Ok(response) => {
+                                    println!(
+                                        "Task '{}' completed successfully (spawn)",
+                                        res.task_name
+                                    );
+                                    if let Err(e) = submit_response(&res, response) {
+                                        eprintln!("Failed to submit response: {}", e);
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("Task '{}' failed: {}", res.task_name, error);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to unpack context: {}", e);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to unpack context: {}", e);
-                    }
-                }
-            });
+                });
+            }
         }
     });
 
