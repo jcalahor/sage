@@ -1,6 +1,7 @@
 use rdkafka::{
     ClientConfig, Message,
     consumer::{BaseConsumer, Consumer},
+    producer::{FutureProducer, FutureRecord},
 };
 use std::any::Any;
 use std::error::Error;
@@ -14,6 +15,22 @@ use tasks_impl::PrimeTaskResponse;
 use tasks_impl::SampleTask;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+
+fn create_kafka_producer() -> FutureProducer {
+    match ClientConfig::new()
+        .set("bootstrap.servers", "localhost:9092")
+        .create::<FutureProducer>()
+    {
+        Ok(producer) => {
+            println!("Kafka producer successfully created!");
+            producer
+        }
+        Err(err) => {
+            println!("Failed to create Kafka producer: {}", err);
+            panic!("Kafka producer creation failed");
+        }
+    }
+}
 
 async fn run_task(
     task_name: &str,
@@ -78,11 +95,12 @@ fn get_context(
     }
 }
 
-fn submit_response(
+async fn submit_response(
+    producer: Arc<FutureProducer>,
     message: &SageMessage,
     response: Box<dyn SageTaskResponse>,
 ) -> Result<(), Box<dyn std::error::Error + Send>> {
-    match message.task_name.as_str() {
+    let payload: String = match message.task_name.as_str() {
         "SampleTask" => {
             let concrete_response = (response.as_ref() as &dyn Any)
                 .downcast_ref::<PrimeTaskResponse>()
@@ -93,7 +111,8 @@ fn submit_response(
                     ))
                 })?;
             println!("SampleTask Response: {:?}", concrete_response);
-            Ok(())
+            serde_json::to_string(concrete_response)
+                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?
         }
         "PrimeTask" => {
             let concrete_response = (response.as_ref() as &dyn Any)
@@ -105,12 +124,43 @@ fn submit_response(
                     ))
                 })?;
             println!("PrimeTask Response: {:?}", concrete_response);
+            serde_json::to_string(concrete_response)
+                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?
+        }
+        _ => {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Unknown task name: {}", message.task_name),
+            )));
+        }
+    };
+
+    let record = FutureRecord::to("responses")
+        .payload(&payload)
+        .key(&message.task_name);
+
+    match producer.send(record, 0).await {
+        Ok(Ok(_)) => {
+            println!(
+                "Response sent successfully to topic 'responses': {}",
+                &payload
+            );
             Ok(())
         }
-        _ => Err(Box::new(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Unknown task name: {}", message.task_name),
-        ))),
+        Ok(Err((e, _))) => {
+            eprintln!("Failed to send response: {:?}", e);
+            Err(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to send to Kafka: {:?}", e),
+            )))
+        }
+        Err(e) => {
+            eprintln!("Kafka send future canceled: {:?}", e);
+            Err(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Kafka send canceled: {:?}", e),
+            )))
+        }
     }
 }
 
@@ -118,6 +168,7 @@ fn submit_response(
 async fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::channel(100);
+
     // Attempt to start the consumer, exit if it fails
     let consumer_handle = match start_consumer(tx, shutdown.clone()) {
         Ok(handle) => handle,
@@ -129,66 +180,92 @@ async fn main() {
     };
 
     tokio::task::spawn(async move {
+        let producer = Arc::new(create_kafka_producer());
+
         while let Some(res) = rx.recv().await {
             // Determine if the task is CPU-intensive and needs spawn_blocking
             let is_cpu_intensive = matches!(res.task_name.as_str(), "PrimeTask");
 
             if is_cpu_intensive {
                 // Spawn blocking for CPU-intensive tasks
-                tokio::task::spawn_blocking(move || {
-                    // Use a new runtime to run the async task in blocking context
-                    let runtime = tokio::runtime::Handle::current();
-                    runtime.block_on(async move {
-                        match get_context(&res) {
-                            Ok(request) => {
-                                // Use the task_name from the message to run the appropriate task
-                                match run_task(&res.task_name, request.as_ref()).await {
-                                    Ok(response) => {
-                                        println!(
-                                            "Task '{}' completed successfully (spawn_blocking)",
-                                            res.task_name
-                                        );
-                                        if let Err(e) = submit_response(&res, response) {
-                                            eprintln!("Failed to submit response: {}", e);
-                                        }
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Task '{}' failed: {}", res.task_name, error);
+                let producer_clone = producer.clone();
+                tokio::task::spawn(async move {
+                    let handle = tokio::task::spawn_blocking(move || {
+                        // Use a new runtime to run the async task in blocking context
+                        let runtime = tokio::runtime::Handle::current();
+                        runtime.block_on(async move {
+                            match get_context(&res) {
+                                Ok(request) => {
+                                    // Use the task_name from the message to run the appropriate task
+                                    match run_task(&res.task_name, request.as_ref()).await {
+                                        Ok(response) => Ok((res, response)),
+                                        Err(e) => Err((res, e)),
                                     }
                                 }
+                                Err(e) => {
+                                    eprintln!("Failed to unpack context: {}", e);
+                                    Err((res, e))
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("Failed to unpack context: {}", e);
+                        })
+                    });
+
+                    match handle.await {
+                        Ok(Ok((message, response))) => {
+                            println!(
+                                "Task '{}' completed successfully (spawn_blocking)",
+                                message.task_name
+                            );
+                            if let Err(e) =
+                                submit_response(producer_clone, &message, response).await
+                            {
+                                eprintln!("Failed to submit response: {}", e);
                             }
                         }
-                    })
+                        Ok(Err((message, error))) => {
+                            eprintln!("Task '{}' failed: {}", message.task_name, error);
+                        }
+                        Err(e) => {
+                            eprintln!("Blocking task panicked: {}", e);
+                        }
+                    }
                 });
             } else {
                 // Regular spawn for async tasks
-                tokio::task::spawn(async move {
+                let producer_clone = producer.clone();
+                let handle = tokio::task::spawn(async move {
                     match get_context(&res) {
                         Ok(request) => {
                             // Use the task_name from the message to run the appropriate task
                             match run_task(&res.task_name, request.as_ref()).await {
-                                Ok(response) => {
-                                    println!(
-                                        "Task '{}' completed successfully (spawn)",
-                                        res.task_name
-                                    );
-                                    if let Err(e) = submit_response(&res, response) {
-                                        eprintln!("Failed to submit response: {}", e);
-                                    }
-                                }
-                                Err(error) => {
-                                    eprintln!("Task '{}' failed: {}", res.task_name, error);
-                                }
+                                Ok(response) => Ok((res, response)),
+                                Err(e) => Err((res, e)),
                             }
                         }
                         Err(e) => {
                             eprintln!("Failed to unpack context: {}", e);
+                            Err((res, e))
                         }
                     }
                 });
+
+                match handle.await {
+                    Ok(Ok((message, response))) => {
+                        println!(
+                            "Task '{}' completed successfully (spawn)",
+                            message.task_name
+                        );
+                        if let Err(e) = submit_response(producer_clone, &message, response).await {
+                            eprintln!("Failed to submit response: {}", e);
+                        }
+                    }
+                    Ok(Err((message, error))) => {
+                        eprintln!("Task '{}' failed: {}", message.task_name, error);
+                    }
+                    Err(e) => {
+                        eprintln!("Async task panicked: {}", e);
+                    }
+                }
             }
         }
     });
