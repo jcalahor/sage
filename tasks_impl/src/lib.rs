@@ -2,31 +2,32 @@ use async_trait::async_trait;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use task::{SageTask, SageTaskRequest, SageTaskResponse};
+use task::{SageTask, TaskResponse};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PrimeTaskRequest {
+pub struct PrimeTaskData {
     pub limit: u64,
 }
-impl SageTaskRequest for PrimeTaskRequest {}
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PrimeTaskResponse {
+pub struct PrimeTaskResponseData {
     pub prime_founds: u64,
 }
-impl SageTaskResponse for PrimeTaskResponse {}
 
 pub struct SampleTask {}
 pub struct PrimeTask {}
 
 #[async_trait]
-impl SageTask<PrimeTaskRequest> for SampleTask {
+impl SageTask<PrimeTaskData, PrimeTaskResponseData> for SampleTask {
     async fn run(
         &self,
-        request: &PrimeTaskRequest,
-    ) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>> {
-        println!("Running task with request value: {}", request.limit);
-        Ok(Box::new(PrimeTaskResponse { prime_founds: 0 }))
+        request: &task::TaskRequest<PrimeTaskData>,
+    ) -> Result<TaskResponse<PrimeTaskResponseData>, Box<dyn std::error::Error + Send>> {
+        println!("Running task with request value: {}", request.data.limit);
+        Ok(TaskResponse::new(
+            request.id,
+            PrimeTaskResponseData { prime_founds: 0 },
+        ))
     }
 }
 
@@ -51,13 +52,13 @@ fn is_prime(n: u64) -> bool {
 }
 
 #[async_trait]
-impl SageTask<PrimeTaskRequest> for PrimeTask {
+impl SageTask<PrimeTaskData, PrimeTaskResponseData> for PrimeTask {
     async fn run(
         &self,
-        request: &PrimeTaskRequest,
-    ) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>> {
+        request: &task::TaskRequest<PrimeTaskData>,
+    ) -> Result<TaskResponse<PrimeTaskResponseData>, Box<dyn std::error::Error + Send>> {
         let start = Instant::now();
-        let primes_par: Vec<u64> = (2..=request.limit)
+        let primes_par: Vec<u64> = (2..=request.data.limit)
             .into_par_iter()
             .filter(|&n| is_prime(n))
             .collect();
@@ -66,10 +67,13 @@ impl SageTask<PrimeTaskRequest> for PrimeTask {
             "Rayon parallel: Found {} primes in {:?} for array of {:?} items",
             primes_par.len(),
             duration_par,
-            request.limit
+            request.data.limit
         );
-        Ok(Box::new(PrimeTaskResponse {
-            prime_founds: primes_par.len() as u64,
-        }))
+        Ok(TaskResponse::new(
+            request.id,
+            PrimeTaskResponseData {
+                prime_founds: primes_par.len() as u64,
+            },
+        ))
     }
 }

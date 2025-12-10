@@ -41,10 +41,14 @@ python produce.py
 The producer script:
 - Uses `confluent-kafka` library (compatible with Python 3.12)
 - Connects to Kafka at `localhost:9092` (works from host machine)
-- Sends messages to the `input_readings` topic
-- Generates 45,000 messages (5000 iterations × 9 stocks)
-- Stock data includes: IBM, MSFT, GOOG, META, XYZ, NVDA, APPL, LKM, UTC
-- Each message is JSON formatted with Symbol, Price, and TimeStamp
+- Sends messages to the `input-readings` topic
+- Generates task requests with unique UUIDs for each message
+- Sends PrimeTask requests with different limit values (45000 and 35000)
+- Each message includes:
+  - `task_name`: The task to execute (e.g., "PrimeTask")
+  - `task_context`: JSON string with `id` (UUID) and task-specific data
+  - `TimeStamp`: Message timestamp
+- Automatically generates a unique UUID v4 for each request
 - Includes delivery callbacks for monitoring
 
 ## Prerequisites

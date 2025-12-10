@@ -1,9 +1,44 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::any::Any;
+use uuid::Uuid;
 
-pub trait SageTaskRequest: Any + Send + Sync {}
-pub trait SageTaskResponse: Any + Send + Sync {}
+/// Generic wrapper that automatically provides an id field for any request type
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskRequest<T> {
+    pub id: Uuid,
+    #[serde(flatten)]
+    pub data: T,
+}
+
+impl<T> TaskRequest<T> {
+    pub fn new(data: T) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            data,
+        }
+    }
+
+    pub fn with_id(id: Uuid, data: T) -> Self {
+        Self { id, data }
+    }
+}
+
+/// Generic wrapper that automatically provides an id field for any response type
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskResponse<T> {
+    pub id: Uuid,
+    #[serde(flatten)]
+    pub data: T,
+}
+
+impl<T> TaskResponse<T> {
+    pub fn new(request_id: Uuid, data: T) -> Self {
+        Self {
+            id: request_id,
+            data,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SageMessage {
@@ -12,11 +47,11 @@ pub struct SageMessage {
 }
 
 #[async_trait]
-pub trait SageTask<T: SageTaskRequest> {
+pub trait SageTask<T, R> {
     async fn run(
         &self,
-        request: &T,
-    ) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>>;
+        request: &TaskRequest<T>,
+    ) -> Result<TaskResponse<R>, Box<dyn std::error::Error + Send>>;
 }
 
 #[cfg(test)]

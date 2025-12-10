@@ -3,16 +3,12 @@ use rdkafka::{
     consumer::{BaseConsumer, Consumer},
     producer::{FutureProducer, FutureRecord},
 };
-use std::any::Any;
 use std::error::Error;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use task::{SageMessage, SageTask, SageTaskRequest, SageTaskResponse};
-use tasks_impl::PrimeTask;
-use tasks_impl::PrimeTaskRequest;
-use tasks_impl::PrimeTaskResponse;
-use tasks_impl::SampleTask;
+use task::{SageMessage, SageTask, TaskRequest, TaskResponse};
+use tasks_impl::{PrimeTask, PrimeTaskData, PrimeTaskResponseData, SampleTask};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 
@@ -34,35 +30,17 @@ fn create_kafka_producer() -> FutureProducer {
 
 async fn run_task(
     task_name: &str,
-    request: &dyn SageTaskRequest,
-) -> Result<Box<dyn SageTaskResponse>, Box<dyn std::error::Error + Send>> {
-    // Downcast the trait object to concrete type
-
+    request: &TaskRequest<PrimeTaskData>,
+) -> Result<TaskResponse<PrimeTaskResponseData>, Box<dyn std::error::Error + Send>> {
     match task_name {
         "SampleTask" => {
-            let concrete_request = (request as &dyn Any)
-                .downcast_ref::<PrimeTaskRequest>()
-                .ok_or_else(|| -> Box<dyn std::error::Error + Send> {
-                    Box::new(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Failed to downcast request",
-                    ))
-                })?;
             let task = SampleTask {};
-            let response: Box<dyn SageTaskResponse> = task.run(concrete_request).await?;
+            let response = task.run(request).await?;
             return Ok(response);
         }
         "PrimeTask" => {
-            let concrete_request = (request as &dyn Any)
-                .downcast_ref::<PrimeTaskRequest>()
-                .ok_or_else(|| -> Box<dyn std::error::Error + Send> {
-                    Box::new(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Failed to downcast request",
-                    ))
-                })?;
             let task = PrimeTask {};
-            let response: Box<dyn SageTaskResponse> = task.run(concrete_request).await?;
+            let response = task.run(request).await?;
             return Ok(response);
         }
         _ => {
@@ -76,17 +54,13 @@ async fn run_task(
 
 fn get_context(
     message: &SageMessage,
-) -> Result<Box<dyn SageTaskRequest>, Box<dyn std::error::Error + Send>> {
+) -> Result<TaskRequest<PrimeTaskData>, Box<dyn std::error::Error + Send>> {
     match message.task_name.as_str() {
-        "SampleTask" => {
-            let request: PrimeTaskRequest = serde_json::from_str(&message.task_context)
-                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
-            Ok(Box::new(request))
-        }
-        "PrimeTask" => {
-            let request: PrimeTaskRequest = serde_json::from_str(&message.task_context)
-                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
-            Ok(Box::new(request))
+        "SampleTask" | "PrimeTask" => {
+            let request: TaskRequest<PrimeTaskData> =
+                serde_json::from_str(&message.task_context)
+                    .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
+            Ok(request)
         }
         _ => Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -98,42 +72,15 @@ fn get_context(
 async fn submit_response(
     producer: Arc<FutureProducer>,
     message: &SageMessage,
-    response: Box<dyn SageTaskResponse>,
+    response: TaskResponse<PrimeTaskResponseData>,
 ) -> Result<(), Box<dyn std::error::Error + Send>> {
-    let payload: String = match message.task_name.as_str() {
-        "SampleTask" => {
-            let concrete_response = (response.as_ref() as &dyn Any)
-                .downcast_ref::<PrimeTaskResponse>()
-                .ok_or_else(|| -> Box<dyn std::error::Error + Send> {
-                    Box::new(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Failed to downcast response",
-                    ))
-                })?;
-            println!("SampleTask Response: {:?}", concrete_response);
-            serde_json::to_string(concrete_response)
-                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?
-        }
-        "PrimeTask" => {
-            let concrete_response = (response.as_ref() as &dyn Any)
-                .downcast_ref::<PrimeTaskResponse>()
-                .ok_or_else(|| -> Box<dyn std::error::Error + Send> {
-                    Box::new(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Failed to downcast response",
-                    ))
-                })?;
-            println!("PrimeTask Response: {:?}", concrete_response);
-            serde_json::to_string(concrete_response)
-                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?
-        }
-        _ => {
-            return Err(Box::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Unknown task name: {}", message.task_name),
-            )));
-        }
-    };
+    println!(
+        "{} Response (ID: {}): {:?}",
+        message.task_name, response.id, response.data
+    );
+
+    let payload = serde_json::to_string(&response)
+        .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
 
     let record = FutureRecord::to("responses")
         .payload(&payload)
@@ -197,7 +144,7 @@ async fn main() {
                             match get_context(&res) {
                                 Ok(request) => {
                                     // Use the task_name from the message to run the appropriate task
-                                    match run_task(&res.task_name, request.as_ref()).await {
+                                    match run_task(&res.task_name, &request).await {
                                         Ok(response) => Ok((res, response)),
                                         Err(e) => Err((res, e)),
                                     }
@@ -237,7 +184,7 @@ async fn main() {
                     match get_context(&res) {
                         Ok(request) => {
                             // Use the task_name from the message to run the appropriate task
-                            match run_task(&res.task_name, request.as_ref()).await {
+                            match run_task(&res.task_name, &request).await {
                                 Ok(response) => Ok((res, response)),
                                 Err(e) => Err((res, e)),
                             }

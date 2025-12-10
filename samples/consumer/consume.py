@@ -25,6 +25,7 @@ def run():
     consumer.subscribe(['responses'])
     
     print("Starting to consume messages from 'responses' topic...")
+    print("Note: Response messages now include an 'id' field from the request")
     print("Press Ctrl+C to stop\n")
     
     # Register signal handler for graceful shutdown

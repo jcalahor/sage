@@ -29,18 +29,22 @@ The consumer will:
 - Subscribe to the `responses` topic
 - Display all incoming messages with their metadata (topic, partition, offset, key)
 - Parse and pretty-print the JSON response payload
+- Show the task execution results including the request ID for traceability
 
 Press `Ctrl+C` to gracefully shutdown the consumer.
 
 ## Message Format
 
-The consumer expects JSON messages in the following format:
+The consumer expects JSON messages containing task responses. Each response includes the original request ID for tracking:
 
+Example response:
 ```json
 {
   "prime_founds": 1234
 }
 ```
+
+Note: The response messages correspond to requests that include an `id` field (UUID) for tracking and correlation.
 
 ## Configuration
 
