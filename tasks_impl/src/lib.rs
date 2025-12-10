@@ -25,7 +25,7 @@ impl SageTask<PrimeTaskData, PrimeTaskResponseData> for SampleTask {
     ) -> Result<TaskResponse<PrimeTaskResponseData>, Box<dyn std::error::Error + Send>> {
         println!("Running task with request value: {}", request.data.limit);
         Ok(TaskResponse::new(
-            request.id,
+            request.task_id,
             PrimeTaskResponseData { prime_founds: 0 },
         ))
     }
@@ -70,7 +70,7 @@ impl SageTask<PrimeTaskData, PrimeTaskResponseData> for PrimeTask {
             request.data.limit
         );
         Ok(TaskResponse::new(
-            request.id,
+            request.task_id,
             PrimeTaskResponseData {
                 prime_founds: primes_par.len() as u64,
             },

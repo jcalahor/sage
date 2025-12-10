@@ -77,9 +77,13 @@ fn get_context(
 ) -> Result<TaskRequestType, Box<dyn std::error::Error + Send>> {
     match message.task_name.as_str() {
         "SampleTask" | "PrimeTask" => {
-            let request: TaskRequestType = serde_json::from_str(&message.task_context)
+            // Deserialize just the data from task_context
+            let data: PrimeTaskData = serde_json::from_str(&message.task_context)
                 .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
-            Ok(request)
+
+            // Create TaskRequest with the task_id from SageMessage
+            let request = TaskRequest::with_id(message.task_id, data);
+            Ok(TaskRequestType::Prime(request))
         }
         _ => Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -97,8 +101,8 @@ async fn submit_response(
     match &response {
         TaskResponseType::Prime(prime_response) => {
             println!(
-                "{} Response (ID: {}): {:?}",
-                message.task_name, prime_response.id, prime_response.data
+                "{} Response (task_id: {}): {:?}",
+                message.task_name, prime_response.task_id, prime_response.data
             );
         }
     }

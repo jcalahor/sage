@@ -20,3 +20,5 @@ chrono = { version = "0.4.39", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 rustls = { version = "0.23", features = ["ring"] }
 redis = { version = "0.29.5", features =["script", "tokio-comp", "aio", "connection-manager", "tls-rustls", "tls-rustls-webpki-roots", "tokio-rustls-comp"]}
+rdkafka = "0.23"
+task = { path = "../task" }

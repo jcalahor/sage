@@ -6,8 +6,8 @@ import random
 import uuid
 
 input_data = [
-    {"task_name": "PrimeTask", "task_context": "{\"id\":\"{id1}\",\"limit\":45000}"},
-    {"task_name": "PrimeTask", "task_context": "{\"id\":\"{id2}\",\"limit\":35000}"},
+    {"task_name": "PrimeTask", "task_context": "{\"limit\":45000}"},
+    {"task_name": "PrimeTask", "task_context": "{\"limit\":35000}"},
 ]
 
 
@@ -37,13 +37,11 @@ def run():
             # Generate a new UUID for each message
             task_id = str(uuid.uuid4())
             
-            # Replace the placeholder with actual UUID
-            task_context = entry["task_context"].replace("{id1}", task_id).replace("{id2}", task_id)
-            
+            # SageMessage structure: task_id at top level, task_context contains only the task data
             message = {
+                "task_id": task_id,
                 "task_name": entry["task_name"],
-                "task_context": task_context,
-                "TimeStamp": ts + random.randint(1000, 10000000)
+                "task_context": entry["task_context"]
             }
             
             output = json.dumps(message).encode('utf-8')
