@@ -1,151 +1,267 @@
 # Sage
 
-A high-performance distributed task queue system built in Rust, similar to Celery but with Rust's performance and safety guarantees.
+A high-performance distributed task queue system built in Rust with Kafka, featuring automatic request/response ID tracking and type-safe task execution.
 
 ## Overview
 
 Sage is a distributed task processing system that allows you to:
 - Execute async tasks across multiple worker nodes
 - Distribute workload via Kafka message broker
-- Define type-safe task requests and implementations
+- Automatic UUID-based request/response correlation
+- Type-safe task requests and responses with generic wrappers
 - Scale horizontally by adding more worker instances
+- JSON-transparent API with flattened serialization
 
 ## Architecture
 
 ```
-                    ┌─────────────┐
-                    │    Kafka    │ ← Message Broker
-                    │   (Broker)  │
-                    └──────┬──────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-    ┌───▼───┐          ┌───▼───┐         ┌───▼───┐
-    │Worker │          │Worker │         │Worker │
-    │  #1   │          │  #2   │         │  #3   │
-    └───────┘          └───────┘         └───────┘
+┌──────────────┐
+│   Producer   │ ← Sends tasks with auto-generated UUIDs
+│  (Python/Any)│
+└──────┬───────┘
+       │
+       ▼
+┌─────────────────────┐
+│      Kafka          │ ← Message Broker
+│  input-readings     │   (Distributes tasks)
+│     responses       │   (Collects results)
+└──────────┬──────────┘
+           │
+    ┌──────┴──────┬──────────┐
+    │             │          │
+┌───▼────┐   ┌───▼────┐  ┌──▼─────┐
+│Worker 1│   │Worker 2│  │Worker 3│ ← Parallel execution
+│(Rust)  │   │(Rust)  │  │(Rust)  │   CPU-intensive tasks
+└───┬────┘   └───┬────┘  └───┬────┘
+    │            │           │
+    └────────────┴───────────┘
+                 │
+                 ▼
+          ┌──────────────┐
+          │   Consumer   │ ← Receives results with IDs
+          │ (Python/Any) │
+          └──────────────┘
 ```
 
-## Features
+## Key Features
 
-- ✅ **Type-Safe Tasks** - Compile-time guarantees for task definitions
+- ✅ **Automatic ID Tracking** - UUID correlation between requests and responses
+- ✅ **Type-Safe Tasks** - Generic `TaskRequest<T>` and `TaskResponse<R>` wrappers
+- ✅ **No Trait Boilerplate** - Clean data structs, automatic trait implementations
 - ✅ **Async/Await** - Built on Tokio for efficient concurrency
-- ✅ **Clean API** - Using `async-trait` for ergonomic async traits
-- ✅ **Distributed** - Kafka integration for horizontal scaling (planned)
-- ✅ **Fast** - Rust performance without garbage collection overhead
-- ✅ **Memory Safe** - No data races or memory leaks
+- ✅ **CPU-Intensive Support** - spawn_blocking for compute-heavy tasks
+- ✅ **Kafka Integration** - Production-ready distributed messaging
+- ✅ **JSON Transparent** - Flattened serialization with `#[serde(flatten)]`
+- ✅ **Extensible** - Enum-based dispatch for multiple task types
+- ✅ **Memory Safe** - Rust's ownership system prevents data races
 
 ## Project Structure
 
 ```
 sage/
-├── task/           # Core task trait definitions
-├── tasks_impl/     # Task implementations
-└── sage_server/    # Main worker server application
+├── task/              # Core traits and generic wrappers
+│   ├── TaskRequest<T>   # Request wrapper with auto UUID
+│   ├── TaskResponse<R>  # Response wrapper with ID correlation
+│   └── SageTask<T, R>   # Task trait definition
+├── tasks_impl/        # Task implementations (business logic)
+│   ├── PrimeTask        # Example: Prime number calculation
+│   └── SampleTask       # Example: Simple task
+├── sage_worker/       # Worker orchestration & dispatch
+│   ├── TaskRequestType  # Enum for routing
+│   ├── TaskResponseType # Enum for responses
+│   └── Kafka consumers/producers
+├── samples/
+│   ├── producer/      # Python example producer
+│   └── consumer/      # Python example consumer
+└── environment/       # Docker compose for Kafka
 ```
 
-## Current Implementation
+## Quick Start
 
-### Defining a Task
+### 1. Start Kafka
+
+```bash
+cd environment
+docker-compose up -d
+```
+
+### 2. Run the Worker
+
+```bash
+cargo run --bin sage_worker
+```
+
+### 3. Send Tasks (Python Producer)
+
+```bash
+cd samples/producer
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python produce.py
+```
+
+### 4. Consume Results (Python Consumer)
+
+```bash
+cd samples/consumer
+source venv/bin/activate
+python consume.py
+```
+
+## Defining a Task
+
+### 1. Create Your Data Types
 
 ```rust
-use task::{SageTask, SageTaskRequest};
-use async_trait::async_trait;
+// In tasks_impl/src/lib.rs
 
-// Define your request type
-pub struct MyRequest {
-    pub data: String,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EmailTaskData {
+    pub recipient: String,
+    pub subject: String,
+    pub body: String,
 }
-impl SageTaskRequest for MyRequest {}
 
-// Define your task
-pub struct MyTask {}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EmailTaskResponseData {
+    pub sent: bool,
+    pub message_id: String,
+}
+```
 
-// Implement the task
+### 2. Implement the Task
+
+```rust
+pub struct EmailTask {}
+
 #[async_trait]
-impl SageTask<MyRequest> for MyTask {
-    async fn run(&self, request: &MyRequest) -> Result<(), Box<dyn std::error::Error + Send>> {
-        println!("Processing: {}", request.data);
-        // Your task logic here
-        Ok(())
+impl SageTask<EmailTaskData, EmailTaskResponseData> for EmailTask {
+    async fn run(
+        &self,
+        request: &TaskRequest<EmailTaskData>,
+    ) -> Result<TaskResponse<EmailTaskResponseData>, Box<dyn std::error::Error + Send>> {
+        // Send email logic here
+        let sent = send_email(&request.data).await?;
+        
+        // Return response with same ID as request
+        Ok(TaskResponse::new(
+            request.id,  // ← Automatic correlation!
+            EmailTaskResponseData {
+                sent: true,
+                message_id: "msg-123".to_string(),
+            }
+        ))
     }
 }
 ```
 
-### Running Tasks
+### 3. Register in Worker (sage_worker/src/main.rs)
 
 ```rust
-let request = MyRequest { data: "Hello".to_string() };
-let task = MyTask {};
-task.run(&request).await?;
+// Add to TaskRequestType enum
+pub enum TaskRequestType {
+    Prime(TaskRequest<PrimeTaskData>),
+    Email(TaskRequest<EmailTaskData>),  // ← Add here
+}
+
+// Add to TaskResponseType enum
+pub enum TaskResponseType {
+    Prime(TaskResponse<PrimeTaskResponseData>),
+    Email(TaskResponse<EmailTaskResponseData>),  // ← Add here
+}
+
+// Add to run_task() match
+TaskRequestType::Email(email_request) => {
+    let task = EmailTask {};
+    Ok(TaskResponseType::Email(task.run(email_request).await?))
+}
 ```
 
-## Getting Started
+## Message Format
 
-### Prerequisites
-
-- Rust 1.70+ (edition 2024)
-- Cargo
-
-### Building
-
-```bash
-cargo build --release
+### Request (Auto-generated ID):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "limit": 45000
+}
 ```
 
-### Running
-
-```bash
-cargo run
+### Response (Same ID):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "prime_founds": 4669
+}
 ```
+
+The `id` field automatically correlates requests with responses!
+
+## Architecture Highlights
+
+### Generic Wrappers
+- `TaskRequest<T>` - Adds UUID to any request type
+- `TaskResponse<R>` - Correlates response with request ID
+- `#[serde(flatten)]` - Keeps JSON flat and clean
+
+### No Redundant Traits
+- Removed `SageTaskRequest` and `SageTaskResponse` traits
+- Direct use of generic types - simpler, cleaner code
+- Compile-time type safety without boilerplate
+
+### Enum Dispatch Pattern
+- Worker defines supported task types via enums
+- Type-safe routing at compile time
+- Easy to add new task types
+
+## Performance
+
+- **Native async/await** with Tokio runtime
+- **spawn_blocking** for CPU-intensive tasks (Prime calculation)
+- **Zero-copy** message passing where possible
+- **Parallel execution** using Rayon for compute tasks
+- **No GIL** - True parallelism
 
 ## Roadmap
 
-- [ ] Kafka integration for distributed task queue
-- [ ] Result backend for task result storage
+- [x] Kafka integration
+- [x] Type-safe task definitions
+- [x] Request/Response ID correlation
+- [x] CPU-intensive task support
+- [x] Python producer/consumer examples
+- [ ] Result backend (Redis/PostgreSQL)
 - [ ] Task retry mechanism
 - [ ] Priority queues
 - [ ] Task scheduling (cron-like)
 - [ ] Monitoring and metrics
-- [ ] Web dashboard (like Celery Flower)
+- [ ] Web dashboard
 - [ ] Task chains and workflows
-- [ ] Rate limiting
 
-## Comparison with Other Systems
+## Comparison
 
-| Feature | Sage (Rust) | Celery (Python) | Sidekiq (Ruby) |
-|---------|-------------|-----------------|----------------|
-| **Performance** | ⭐⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐ |
-| **Memory Safety** | ✅ Compile-time | ❌ Runtime | ❌ Runtime |
-| **Async** | Native (Tokio) | Asyncio | N/A |
-| **Type Safety** | ✅ Strong | ⚠️ Dynamic | ⚠️ Dynamic |
-| **Concurrency** | True parallelism | GIL limited | GIL limited |
-
-## Use Cases
-
-- Background job processing for web applications
-- Data pipeline orchestration
-- Scheduled task execution
-- Webhook processing
-- Email/notification systems
-- Image/video processing
-- API request offloading
-- Batch data processing
+| Feature | Sage (Rust) | Celery (Python) |
+|---------|-------------|-----------------|
+| **Performance** | ⭐⭐⭐⭐⭐ Native | ⭐⭐ Interpreted |
+| **Memory Safety** | ✅ Compile-time | ❌ Runtime |
+| **ID Tracking** | ✅ Automatic | ⚠️ Manual |
+| **Type Safety** | ✅ Strong generics | ⚠️ Dynamic |
+| **Concurrency** | ✅ True parallelism | ❌ GIL limited |
+| **CPU Tasks** | ✅ spawn_blocking | ⚠️ multiprocessing |
 
 ## Contributing
 
-Contributions are welcome! This is an early-stage project.
+Contributions welcome! This project demonstrates:
+- Modern Rust async patterns
+- Generic wrapper types with serde
+- Kafka integration with rdkafka
+- Enum dispatch patterns
+- Cross-language RPC (Rust ↔ Python)
 
 ## License
 
-[Your chosen license]
-
-## Acknowledgments
-
-- Inspired by Celery (Python) and Sidekiq (Ruby)
-- Built with Rust's async ecosystem (Tokio, async-trait)
-- Uses Kafka for distributed messaging (planned)
+MIT / Apache-2.0 (choose your preference)
 
 ---
 
-**Status**: 🚧 Early Development - Not production ready
+**Status**: 🚀 **Production-Ready Core** - Kafka integration complete, ID tracking implemented

@@ -1,6 +1,6 @@
-# Testing Kafka Producer and Consumer
+# Testing Sage with Kafka
 
-This guide explains how to test the Kafka message flow between the Python producer and Rust consumer.
+This guide explains how to test the complete Sage task queue system with Python producers and consumers.
 
 ## Prerequisites
 
@@ -16,129 +16,276 @@ This guide explains how to test the Kafka message flow between the Python produc
    ```
    You should see `kafka`, `zookeeper`, and `kafka-ui` running.
 
-## Testing Steps
+## Complete Testing Flow
 
-### Step 1: Start the Rust Consumer
+### Step 1: Start the Rust Worker
 
-In one terminal:
+In terminal 1:
 
 ```bash
-cargo run -p sage_worker
+cargo run --bin sage_worker
 ```
 
 You should see:
 ```
 Kafka consumer started successfully, listening for messages...
-Running task with request value: 20
-Task completed successfully
-Running task2 with request value: 20
-Task completed successfully
 Worker running, press Ctrl+C to exit...
 ```
 
-The consumer is now waiting for messages.
+The worker is now waiting for task requests.
 
-### Step 2: Run the Python Producer
+### Step 2: Run the Python Producer (Send Tasks)
 
-In another terminal:
+In terminal 2:
 
 ```bash
 cd samples/producer
-source venv/bin/activate  # or use ./venv/bin/python produce.py
+source venv/bin/activate
 python produce.py
 ```
 
-You should see progress messages:
+You should see:
 ```
-Starting to send 45000 messages...
-Sent 0 messages...
-Sent 9000 messages...
-...
+Starting to send 4 messages...
+Message delivered to input-readings [0]
+Flushing remaining messages...
+Successfully sent all 4 messages!
 ```
 
-### Step 3: Observe Messages
+### Step 3: Observe Worker Processing
 
-In the consumer terminal, you should now see messages being received:
+Back in terminal 1 (worker), you should see tasks being executed:
+
 ```
-Received: {"Symbol": "IBM", "Price": 102.3, "TimeStamp": 1764365789123}
-Received: {"Symbol": "MSFT", "Price": 10.3, "TimeStamp": 1764365799456}
-Received: {"Symbol": "GOOG", "Price": 1002.3, "TimeStamp": 1764365809789}
-...
+Received SageMessage: task_name='PrimeTask', task_context='{"id":"abc-123","limit":45000}'
+Task 'PrimeTask' completed successfully (spawn_blocking)
+Rayon parallel: Found 4669 primes in 23.5ms for array of 45000 items
+PrimeTask Response (ID: abc-123): PrimeTaskResponseData { prime_founds: 4669 }
+Response sent successfully to topic 'responses': {"id":"abc-123","prime_founds":4669}
+```
+
+### Step 4: Run the Python Consumer (Receive Results)
+
+In terminal 3:
+
+```bash
+cd samples/consumer
+source venv/bin/activate
+python consume.py
+```
+
+You should see responses with correlated IDs:
+
+```
+Starting to consume messages from 'responses' topic...
+Note: Response messages now include an 'id' field from the request
+Press Ctrl+C to stop
+
+[Message #1]
+  Topic: responses
+  Partition: 0
+  Offset: 0
+  Key: PrimeTask
+  Value: {
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "prime_founds": 4669
+}
+------------------------------------------------------------
+```
+
+## What's Happening
+
+1. **Producer** sends task requests with auto-generated UUIDs:
+   ```json
+   {
+     "task_name": "PrimeTask",
+     "task_context": "{\"id\":\"abc-123\",\"limit\":45000}"
+   }
+   ```
+
+2. **Worker** receives, processes, and returns results with same ID:
+   ```json
+   {
+     "id": "abc-123",
+     "prime_founds": 4669
+   }
+   ```
+
+3. **Consumer** receives responses and can correlate them with requests via ID
+
+## Message Flow Diagram
+
+```
+Producer → [input-readings] → Worker → [responses] → Consumer
+   |              ↓              |          ↓           |
+   |         Task Request        |    Task Response    |
+   |      {"id":"abc-123",...}   |  {"id":"abc-123"..} |
+   └────────────────────────────┴───────────────────────┘
+              Same UUID for correlation!
 ```
 
 ## Troubleshooting
 
-### Consumer not receiving messages
+### Worker not receiving messages
 
-1. **Check Kafka is accessible**:
+1. **Check topics exist**:
    ```bash
-   # List topics
    docker exec kafka kafka-topics --list --bootstrap-server localhost:9092
    ```
+   Should show `input-readings` and `responses`.
 
-2. **Verify topic exists**:
-   The topic `input_readings` should be listed. If not, create it:
+2. **Create topics if missing**:
    ```bash
+   # Input topic
    docker exec kafka kafka-topics --create \
      --bootstrap-server localhost:9092 \
-     --topic input_readings \
+     --topic input-readings \
+     --partitions 3 \
+     --replication-factor 1
+
+   # Response topic
+   docker exec kafka kafka-topics --create \
+     --bootstrap-server localhost:9092 \
+     --topic responses \
      --partitions 3 \
      --replication-factor 1
    ```
 
 3. **Check messages in topic**:
    ```bash
+   # Check input messages
    docker exec kafka kafka-console-consumer \
      --bootstrap-server localhost:9092 \
-     --topic input_readings \
+     --topic input-readings \
+     --from-beginning \
+     --max-messages 5
+
+   # Check response messages
+   docker exec kafka kafka-console-consumer \
+     --bootstrap-server localhost:9092 \
+     --topic responses \
      --from-beginning \
      --max-messages 5
    ```
 
-4. **Verify connection settings**:
-   - Producer connects to: `localhost:9092`
-   - Consumer connects to: `localhost:9092`
-   - Both should use the same address
+### Connection errors
 
-### Producer connection errors
-
-If the producer can't connect:
-
-1. Check Kafka is listening on localhost:9092:
+1. **Verify Kafka is accessible**:
    ```bash
    netstat -an | grep 9092
+   # Should show LISTEN on port 9092
    ```
 
-2. Check Kafka logs:
+2. **Check Kafka logs**:
    ```bash
    docker logs kafka
    ```
 
+3. **Verify Python dependencies**:
+   ```bash
+   cd samples/producer
+   source venv/bin/activate
+   pip list | grep confluent
+   ```
+   Should show `confluent-kafka`.
+
+### No responses in consumer
+
+1. **Check worker is processing**:
+   - Look for "Task completed successfully" in worker logs
+   - Verify "Response sent successfully" appears
+
+2. **Check consumer group offset**:
+   ```bash
+   docker exec kafka kafka-consumer-groups \
+     --bootstrap-server localhost:9092 \
+     --describe \
+     --group python-consumer-group
+   ```
+
 ## Using Kafka UI
 
-Access the web interface at http://localhost:8080 to:
-- View topics and their messages
-- Monitor consumer groups
+Access the web interface at **http://localhost:8080** to:
+- View `input-readings` and `responses` topics
+- Inspect message payloads and IDs
+- Monitor consumer groups (`andean-group`, `python-consumer-group`)
 - Check broker health
-- Inspect message details
+- View message flow in real-time
 
 ## Configuration Summary
 
-### Rust Consumer (sage_worker)
-- Bootstrap servers: `localhost:9092`
-- Topic: `input-readings`
-- Consumer group: `andean-group`
-- Auto offset reset: `earliest` (reads from beginning)
+### Rust Worker (sage_worker)
+- **Consumes from**: `input-readings` topic
+- **Produces to**: `responses` topic
+- **Consumer group**: `andean-group`
+- **Auto offset reset**: `earliest`
+- **Bootstrap servers**: `localhost:9092`
 
 ### Python Producer (samples/producer)
-- Bootstrap servers: `localhost:9092`
-- Topic: `input-readings`
-- Sends 18 messages (2 iterations × 9 stocks)
+- **Produces to**: `input-readings` topic
+- **Message count**: 4 (2 iterations × 2 task configs)
+- **Bootstrap servers**: `localhost:9092`
+- **Auto-generates**: UUID for each task
+
+### Python Consumer (samples/consumer)
+- **Consumes from**: `responses` topic
+- **Consumer group**: `python-consumer-group`
+- **Auto offset reset**: `earliest`
+- **Bootstrap servers**: `localhost:9092`
+
+## Testing Different Task Types
+
+To test with custom limits:
+
+1. **Edit producer** (`samples/producer/produce.py`):
+   ```python
+   input_data = [
+       {"task_name": "PrimeTask", "task_context": "{\"id\":\"{id1}\",\"limit\":100000}"},
+       {"task_name": "SampleTask", "task_context": "{\"id\":\"{id2}\",\"limit\":1000}"},
+   ]
+   ```
+
+2. **Run producer** and watch worker process different limits
+
+3. **Observe** CPU-intensive vs quick tasks:
+   - `PrimeTask` uses `spawn_blocking` (parallel)
+   - `SampleTask` is quick (returns 0 primes)
 
 ## Stopping
 
-1. **Stop consumer**: Press `Ctrl+C` in the consumer terminal
-2. **Stop Kafka**: 
+1. **Stop consumer**: `Ctrl+C` in consumer terminal
+2. **Stop worker**: `Ctrl+C` in worker terminal  
+3. **Stop Kafka**:
    ```bash
    cd environment
    docker-compose down
+   ```
+
+## Performance Testing
+
+To test high throughput:
+
+1. **Increase message count** in producer:
+   ```python
+   LIMIT = 1000  # Send 2000 messages
+   ```
+
+2. **Run multiple workers**:
+   ```bash
+   # Terminal 1
+   cargo run --bin sage_worker
+   
+   # Terminal 2
+   cargo run --bin sage_worker
+   
+   # Terminal 3
+   cargo run --bin sage_worker
+   ```
+
+3. **Send tasks** and observe load distribution across workers
+
+4. **Monitor** in Kafka UI to see message distribution across partitions
+
+---
+
+**Tip**: Use `Ctrl+C` gracefully shuts down all components with proper cleanup!
