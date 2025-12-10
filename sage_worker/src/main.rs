@@ -3,6 +3,7 @@ use rdkafka::{
     consumer::{BaseConsumer, Consumer},
     producer::{FutureProducer, FutureRecord},
 };
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::io;
 use std::sync::Arc;
@@ -11,6 +12,22 @@ use task::{SageMessage, SageTask, TaskRequest, TaskResponse};
 use tasks_impl::{PrimeTask, PrimeTaskData, PrimeTaskResponseData, SampleTask};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
+
+// Enum to support multiple task request types
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TaskRequestType {
+    Prime(TaskRequest<PrimeTaskData>),
+    // Add more task types here as needed
+}
+
+// Enum to support multiple task response types
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TaskResponseType {
+    Prime(TaskResponse<PrimeTaskResponseData>),
+    // Add more task types here as needed
+}
 
 fn create_kafka_producer() -> FutureProducer {
     match ClientConfig::new()
@@ -30,36 +47,38 @@ fn create_kafka_producer() -> FutureProducer {
 
 async fn run_task(
     task_name: &str,
-    request: &TaskRequest<PrimeTaskData>,
-) -> Result<TaskResponse<PrimeTaskResponseData>, Box<dyn std::error::Error + Send>> {
-    match task_name {
-        "SampleTask" => {
-            let task = SampleTask {};
-            let response = task.run(request).await?;
-            return Ok(response);
+    request: &TaskRequestType,
+) -> Result<TaskResponseType, Box<dyn std::error::Error + Send>> {
+    match request {
+        TaskRequestType::Prime(prime_request) => {
+            let response = match task_name {
+                "SampleTask" => {
+                    let task = SampleTask {};
+                    task.run(prime_request).await?
+                }
+                "PrimeTask" => {
+                    let task = PrimeTask {};
+                    task.run(prime_request).await?
+                }
+                _ => {
+                    return Err(Box::new(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "Task not found",
+                    )));
+                }
+            };
+            Ok(TaskResponseType::Prime(response))
         }
-        "PrimeTask" => {
-            let task = PrimeTask {};
-            let response = task.run(request).await?;
-            return Ok(response);
-        }
-        _ => {
-            return Err(Box::new(io::Error::new(
-                io::ErrorKind::NotFound,
-                "Task not found",
-            )));
-        }
-    };
+    }
 }
 
 fn get_context(
     message: &SageMessage,
-) -> Result<TaskRequest<PrimeTaskData>, Box<dyn std::error::Error + Send>> {
+) -> Result<TaskRequestType, Box<dyn std::error::Error + Send>> {
     match message.task_name.as_str() {
         "SampleTask" | "PrimeTask" => {
-            let request: TaskRequest<PrimeTaskData> =
-                serde_json::from_str(&message.task_context)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
+            let request: TaskRequestType = serde_json::from_str(&message.task_context)
+                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
             Ok(request)
         }
         _ => Err(Box::new(io::Error::new(
@@ -72,12 +91,17 @@ fn get_context(
 async fn submit_response(
     producer: Arc<FutureProducer>,
     message: &SageMessage,
-    response: TaskResponse<PrimeTaskResponseData>,
+    response: TaskResponseType,
 ) -> Result<(), Box<dyn std::error::Error + Send>> {
-    println!(
-        "{} Response (ID: {}): {:?}",
-        message.task_name, response.id, response.data
-    );
+    // Pattern match on response type to extract inner data
+    match &response {
+        TaskResponseType::Prime(prime_response) => {
+            println!(
+                "{} Response (ID: {}): {:?}",
+                message.task_name, prime_response.id, prime_response.data
+            );
+        }
+    }
 
     let payload = serde_json::to_string(&response)
         .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
