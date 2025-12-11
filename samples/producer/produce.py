@@ -43,9 +43,7 @@ def run():
                 "task_name": entry["task_name"],
                 "task_context": entry["task_context"]
             }
-            
-            output = json.dumps(message).encode('utf-8')
-            
+   
             # Produce message
             producer.produce(
                 'input-readings',
