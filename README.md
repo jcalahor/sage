@@ -15,32 +15,41 @@ Sage is a distributed task processing system that allows you to:
 ## Architecture
 
 ```
-┌──────────────┐
-│   Producer   │ ← Sends tasks with auto-generated UUIDs
-│  (Python/Any)│
-└──────┬───────┘
-       │
-       ▼
-┌─────────────────────┐
-│      Kafka          │ ← Message Broker
-│  input-readings     │   (Distributes tasks)
-│     responses       │   (Collects results)
-└──────────┬──────────┘
-           │
-    ┌──────┴──────┬──────────┐
-    │             │          │
-┌───▼────┐   ┌───▼────┐  ┌──▼─────┐
-│Worker 1│   │Worker 2│  │Worker 3│ ← Parallel execution
-│(Rust)  │   │(Rust)  │  │(Rust)  │   CPU-intensive tasks
-└───┬────┘   └───┬────┘  └───┬────┘
-    │            │           │
-    └────────────┴───────────┘
-                 │
-                 ▼
-          ┌──────────────┐
-          │   Consumer   │ ← Receives results with IDs
-          │ (Python/Any) │
-          └──────────────┘
+┌──────────────────────────────────────────────┐
+│           sage_server (Axum Web API)          │
+│  ┌─────────────────────────────────────────┐ │
+│  │  POST /tasks/v1/start                   │ │ ← HTTP REST API
+│  │  • Receives task requests               │ │
+│  │  • Generates task UUID                  │ │
+│  │  • Publishes to Kafka                   │ │
+│  └─────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────┐ │
+│  │  Response Consumer                      │ │ ← Listens for results
+│  │  • Consumes from 'responses' topic     │ │
+│  │  • Logs completed task results          │ │
+│  └─────────────────────────────────────────┘ │
+└──────────────────┬───────────────────────────┘
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │      Kafka          │ ← Message Broker
+        │  input-readings     │   (Task Queue)
+        │     responses       │   (Result Queue)
+        └──────────┬──────────┘
+                   │
+    ┌──────────────┴──────────────┬──────────────┐
+    │                             │              │
+┌───▼──────────┐   ┌──────▼───────┐  ┌──────▼────────┐
+│ sage_worker 1│   │ sage_worker 2│  │ sage_worker 3 │ ← Distributed Workers
+│              │   │              │  │               │
+│ • Consumes   │   │ • Consumes   │  │ • Consumes    │
+│   tasks      │   │   tasks      │  │   tasks       │
+│ • Executes   │   │ • Executes   │  │ • Executes    │
+│   async or   │   │   async or   │  │   async or    │
+│   CPU tasks  │   │   CPU tasks  │  │   CPU tasks   │
+│ • Publishes  │   │ • Publishes  │  │ • Publishes   │
+│   results    │   │   results    │  │   results     │
+└──────────────┘   └──────────────┘  └───────────────┘
 ```
 
 ## Key Features
@@ -60,19 +69,25 @@ Sage is a distributed task processing system that allows you to:
 ```
 sage/
 ├── task/              # Core traits and generic wrappers
+│   ├── SageMessage      # Message format for Kafka
 │   ├── TaskRequest<T>   # Request wrapper with auto UUID
 │   ├── TaskResponse<R>  # Response wrapper with ID correlation
 │   └── SageTask<T, R>   # Task trait definition
 ├── tasks_impl/        # Task implementations (business logic)
 │   ├── PrimeTask        # Example: Prime number calculation
 │   └── SampleTask       # Example: Simple task
+├── sage_server/       # HTTP API Server (Axum)
+│   ├── REST API         # POST /tasks/v1/start endpoint
+│   ├── Kafka Producer   # Publishes tasks to input-readings
+│   └── Kafka Consumer   # Consumes results from responses
 ├── sage_worker/       # Worker orchestration & dispatch
 │   ├── TaskRequestType  # Enum for routing
 │   ├── TaskResponseType # Enum for responses
-│   └── Kafka consumers/producers
+│   ├── Kafka Consumer   # Consumes from input-readings
+│   └── Kafka Producer   # Publishes to responses
 ├── samples/
-│   ├── producer/      # Python example producer
-│   └── consumer/      # Python example consumer
+│   ├── producer/      # Python example producer (legacy)
+│   └── consumer/      # Python example consumer (legacy)
 └── environment/       # Docker compose for Kafka
 ```
 
@@ -85,25 +100,56 @@ cd environment
 docker-compose up -d
 ```
 
-### 2. Run the Worker
+### 2. Run the Server (HTTP API)
 
 ```bash
+cargo run --bin sage_server
+```
+
+The server will start at `http://0.0.0.0:4000`
+
+### 3. Run Workers (Scale as needed)
+
+```bash
+# Terminal 2 - Worker 1
+cargo run --bin sage_worker
+
+# Terminal 3 - Worker 2 (optional)
+cargo run --bin sage_worker
+
+# Terminal 4 - Worker 3 (optional)
 cargo run --bin sage_worker
 ```
 
-### 3. Send Tasks (Python Producer)
+### 4. Submit Tasks via HTTP API
 
 ```bash
+# Using curl
+curl -X POST http://localhost:4000/tasks/v1/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requestor_id": 12345,
+    "task_name": "PrimeTask",
+    "task_context": "{\"limit\": 10000}"
+  }'
+
+# Response:
+# {"status": true, "id": "550e8400-e29b-41d4-a716-446655440000"}
+```
+
+### 5. Legacy: Python Producer/Consumer (Optional)
+
+You can still use Python clients if needed:
+
+```bash
+# Producer
 cd samples/producer
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python produce.py
-```
 
-### 4. Consume Results (Python Consumer)
-
-```bash
+# Consumer
 cd samples/consumer
 source venv/bin/activate
 python consume.py
@@ -156,7 +202,7 @@ impl SageTask<EmailTaskData, EmailTaskResponseData> for EmailTask {
 }
 ```
 
-### 3. Register in Worker (sage_worker/src/main.rs)
+### 3. Register in sage_worker (sage_worker/src/main.rs)
 
 ```rust
 // Add to TaskRequestType enum
@@ -215,12 +261,35 @@ The `id` field automatically correlates requests with responses!
 - Type-safe routing at compile time
 - Easy to add new task types
 
+## Components
+
+### sage_server
+
+An Axum-based HTTP REST API server that:
+- **Accepts HTTP POST requests** at `/tasks/v1/start`
+- **Publishes tasks** to Kafka topic `input-readings`
+- **Consumes responses** from Kafka topic `responses`
+- **Auto-generates UUIDs** for request/response correlation
+- **Graceful shutdown** with `tokio::select!` for Ctrl+C handling
+- **CORS enabled** for cross-origin requests
+
+### sage_worker
+
+A background worker that:
+- **Consumes tasks** from Kafka topic `input-readings`
+- **Executes tasks** asynchronously with Tokio
+- **spawn_blocking** for CPU-intensive tasks (e.g., PrimeTask)
+- **Publishes results** to Kafka topic `responses`
+- **Parallel processing** - run multiple workers simultaneously
+- **Type-safe dispatch** via enum pattern matching
+
 ## Performance
 
 - **Native async/await** with Tokio runtime
 - **spawn_blocking** for CPU-intensive tasks (Prime calculation)
 - **Zero-copy** message passing where possible
 - **Parallel execution** using Rayon for compute tasks
+- **Horizontal scaling** - run multiple workers
 - **No GIL** - True parallelism
 
 ## Roadmap
@@ -229,7 +298,10 @@ The `id` field automatically correlates requests with responses!
 - [x] Type-safe task definitions
 - [x] Request/Response ID correlation
 - [x] CPU-intensive task support
-- [x] Python producer/consumer examples
+- [x] HTTP REST API server (sage_server)
+- [x] Worker orchestration (sage_worker)
+- [x] Graceful shutdown handling
+- [x] Python producer/consumer examples (legacy)
 - [ ] Result backend (Redis/PostgreSQL)
 - [ ] Task retry mechanism
 - [ ] Priority queues
@@ -237,6 +309,7 @@ The `id` field automatically correlates requests with responses!
 - [ ] Monitoring and metrics
 - [ ] Web dashboard
 - [ ] Task chains and workflows
+- [ ] WebSocket support for real-time updates
 
 ## Comparison
 
@@ -262,6 +335,33 @@ Contributions welcome! This project demonstrates:
 
 MIT / Apache-2.0 (choose your preference)
 
+## API Documentation
+
+### POST /tasks/v1/start
+
+Submit a new task for processing.
+
+**Request Body:**
+```json
+{
+  "requestor_id": 12345,
+  "task_name": "PrimeTask",
+  "task_context": "{\"limit\": 10000}"
+}
+```
+
+**Response:**
+```json
+{
+  "status": true,
+  "id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Available Tasks:**
+- `PrimeTask` - Calculate prime numbers up to a limit
+- `SampleTask` - Simple echo task for testing
+
 ---
 
-**Status**: 🚀 **Production-Ready Core** - Kafka integration complete, ID tracking implemented
+**Status**: 🚀 **Production-Ready** - HTTP API server + distributed workers operational
