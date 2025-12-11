@@ -1,5 +1,4 @@
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
-use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -18,22 +17,6 @@ struct StartRequest {
     requestor_id: i64,
     task_name: String,
     task_context: String,
-}
-
-fn create_kafka_producer() -> FutureProducer {
-    match ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
-        .create::<FutureProducer>()
-    {
-        Ok(producer) => {
-            println!("Kafka producer successfully created!");
-            producer
-        }
-        Err(err) => {
-            println!("Failed to create Kafka producer: {}", err);
-            panic!("Kafka producer creation failed");
-        }
-    }
 }
 
 async fn start(
@@ -85,13 +68,12 @@ pub fn create_routes() -> Router<Arc<FutureProducer>> {
     Router::new().route("/tasks/v1/start", post(start))
 }
 
-pub async fn build_server() -> Router {
+pub async fn build_server(producer: Arc<FutureProducer>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let producer: Arc<FutureProducer> = Arc::new(create_kafka_producer());
     Router::new()
         .merge(create_routes())
         .layer(cors)
