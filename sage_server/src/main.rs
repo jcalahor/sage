@@ -1,4 +1,6 @@
+mod db;
 mod server;
+
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{
@@ -82,6 +84,28 @@ async fn process_responses(consumer: BaseConsumer, mut shutdown_rx: broadcast::R
 
 #[tokio::main]
 async fn main() {
+    // Initialize database connection
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://sage:sage_password@localhost:5432/sage_db".to_string());
+
+    println!("Connecting to database...");
+    let db_pool = match db::create_pool(&database_url).await {
+        Ok(pool) => {
+            println!("Database connection established!");
+            pool
+        }
+        Err(err) => {
+            eprintln!("Failed to connect to database: {}", err);
+            panic!("Database connection failed");
+        }
+    };
+
+    // Initialize database schema
+    if let Err(err) = db::init_db(&db_pool).await {
+        eprintln!("Failed to initialize database: {}", err);
+        panic!("Database initialization failed");
+    }
+
     let address = format!("{}:{}", "0.0.0.0", 4000);
     let listener = tokio::net::TcpListener::bind(&address).await.unwrap();
     println!("Server started at {}", &address);
@@ -108,7 +132,7 @@ async fn main() {
     // Run server with graceful shutdown
     let server = axum::serve(
         listener,
-        server::build_server(producer.clone())
+        server::build_server(producer.clone(), db_pool.clone())
             .await
             .into_make_service(),
     );

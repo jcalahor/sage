@@ -43,6 +43,30 @@ services:
     networks:
       - kafka-network
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment: 
+      POSTGRES_USER: sage
+      POSTGRES_PASSWORD: sage_password
+      POSTGRES_DB: sage_db
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sage"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   kafka-network:
     driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local
