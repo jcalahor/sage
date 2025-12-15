@@ -21,35 +21,37 @@ Sage is a distributed task processing system that allows you to:
 │  │  POST /tasks/v1/start                   │ │ ← HTTP REST API
 │  │  • Receives task requests               │ │
 │  │  • Generates task UUID                  │ │
+│  │  • Stores task in PostgreSQL            │ │
 │  │  • Publishes to Kafka                   │ │
 │  └─────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────┐ │
 │  │  Response Consumer                      │ │ ← Listens for results
 │  │  • Consumes from 'responses' topic     │ │
-│  │  • Logs completed task results          │ │
+│  │  • Updates task status in DB            │ │
+│  │  • Stores result in 'result' column     │ │
 │  └─────────────────────────────────────────┘ │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-        ┌─────────────────────┐
-        │      Kafka          │ ← Message Broker
-        │  input-readings     │   (Task Queue)
-        │     responses       │   (Result Queue)
-        └──────────┬──────────┘
-                   │
-    ┌──────────────┴──────────────┬──────────────┐
-    │                             │              │
-┌───▼──────────┐   ┌──────▼───────┐  ┌──────▼────────┐
-│ sage_worker 1│   │ sage_worker 2│  │ sage_worker 3 │ ← Distributed Workers
-│              │   │              │  │               │
-│ • Consumes   │   │ • Consumes   │  │ • Consumes    │
-│   tasks      │   │   tasks      │  │   tasks       │
-│ • Executes   │   │ • Executes   │  │ • Executes    │
-│   async or   │   │   async or   │  │   async or    │
-│   CPU tasks  │   │   CPU tasks  │  │   CPU tasks   │
-│ • Publishes  │   │ • Publishes  │  │ • Publishes   │
-│   results    │   │   results    │  │   results     │
-└──────────────┘   └──────────────┘  └───────────────┘
+└──────────────────┬──────────────┬────────────┘
+                   │              │
+                   ▼              ▼
+        ┌─────────────────────┐  ┌─────────────────┐
+        │      Kafka          │  │   PostgreSQL    │
+        │  input-readings     │  │   Task Queue    │
+        │     responses       │  │   • tasks table │
+        └──────────┬──────────┘  │   • Status:     │
+                   │              │     - pending   │
+    ┌──────────────┴──────────┐  │     - completed │
+    │                          │  │     - error     │
+┌───▼──────────┐   ┌──────▼───┐  └─────────────────┘
+│ sage_worker 1│   │sage_worker│  ← Distributed Workers
+│              │   │     2     │
+│ • Consumes   │   │• Consumes │
+│   tasks      │   │  tasks    │
+│ • Executes   │   │• Executes │
+│   async or   │   │  async or │
+│   CPU tasks  │   │  CPU tasks│
+│ • Publishes  │   │• Publishes│
+│   results    │   │  results  │
+└──────────────┘   └───────────┘
 ```
 
 ## Key Features
@@ -261,14 +263,77 @@ The `id` field automatically correlates requests with responses!
 - Type-safe routing at compile time
 - Easy to add new task types
 
+## Database Schema
+
+### PostgreSQL Tasks Table
+
+Sage uses PostgreSQL to persist task state and results:
+
+```sql
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY,
+    requestor_id BIGINT NOT NULL,
+    task_name VARCHAR(255) NOT NULL,
+    task_context TEXT NOT NULL,           -- Input parameters (JSON string)
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    max_retries INTEGER NOT NULL DEFAULT 3,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    result JSONB,                         -- Response data from worker
+    error TEXT,
+    worker_id VARCHAR(255),
+    
+    CONSTRAINT check_status_values 
+        CHECK (status IN ('pending', 'completed', 'error'))
+);
+```
+
+### Task Status Flow
+
+1. **pending** - Task created and queued (initial state)
+2. **completed** - Task successfully processed, result stored
+3. **error** - Task failed, error message stored
+
+### SageMessage Format
+
+The `SageMessage` struct is used for Kafka communication:
+
+```rust
+pub struct SageMessage {
+    pub task_id: Uuid,
+    pub task_name: String,
+    pub task_envelope: String,  // JSON string containing request/response data
+}
+```
+
+- **Request**: `task_envelope` contains the serialized task input parameters
+- **Response**: `task_envelope` contains the serialized task result data
+
+### Response Processing Flow
+
+1. **Worker completes task** → Creates `SageMessage` with result in `task_envelope`
+2. **Worker publishes** → Sends to Kafka `responses` topic
+3. **Server consumes** → Receives message from Kafka
+4. **Server parses** → Deserializes `task_envelope` as JSON
+5. **Server updates DB** → Creates `TaskUpdate` with:
+   - `status` = "completed"
+   - `completed_at` = current timestamp
+   - `result` = parsed JSON from `task_envelope`
+6. **Database persists** → Task result permanently stored
+
 ## Components
 
 ### sage_server
 
 An Axum-based HTTP REST API server that:
 - **Accepts HTTP POST requests** at `/tasks/v1/start`
+- **Stores tasks in PostgreSQL** with status "pending"
 - **Publishes tasks** to Kafka topic `input-readings`
 - **Consumes responses** from Kafka topic `responses`
+- **Updates task status** in database with results
 - **Auto-generates UUIDs** for request/response correlation
 - **Graceful shutdown** with `tokio::select!` for Ctrl+C handling
 - **CORS enabled** for cross-origin requests
@@ -279,6 +344,7 @@ A background worker that:
 - **Consumes tasks** from Kafka topic `input-readings`
 - **Executes tasks** asynchronously with Tokio
 - **spawn_blocking** for CPU-intensive tasks (e.g., PrimeTask)
+- **Creates SageMessage** with result in `task_envelope` field
 - **Publishes results** to Kafka topic `responses`
 - **Parallel processing** - run multiple workers simultaneously
 - **Type-safe dispatch** via enum pattern matching
@@ -302,7 +368,9 @@ A background worker that:
 - [x] Worker orchestration (sage_worker)
 - [x] Graceful shutdown handling
 - [x] Python producer/consumer examples (legacy)
-- [ ] Result backend (Redis/PostgreSQL)
+- [x] PostgreSQL result backend with task persistence
+- [x] Task status constraints (pending, completed, error)
+- [x] Response processing and database updates
 - [ ] Task retry mechanism
 - [ ] Priority queues
 - [ ] Task scheduling (cron-like)
