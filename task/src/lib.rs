@@ -41,7 +41,7 @@ impl<T> TaskResponse<T> {
 pub struct SageMessage {
     pub task_id: Uuid,
     pub task_name: String,
-    pub task_context: String,
+    pub task_envelope: String,
 }
 
 #[async_trait]

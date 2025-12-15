@@ -101,6 +101,25 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Add CHECK constraint to status column to restrict values to pending, completed, error
+    sqlx::query(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint 
+                WHERE conname = 'check_status_values'
+            ) THEN
+                ALTER TABLE tasks 
+                ADD CONSTRAINT check_status_values 
+                CHECK (status IN ('pending', 'completed', 'error'));
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     println!("Database initialized successfully");
     Ok(())
 }

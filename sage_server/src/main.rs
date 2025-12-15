@@ -1,13 +1,16 @@
 mod db;
 mod server;
 
+use chrono::Utc;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{
     Message as RdMesssage,
     consumer::{BaseConsumer, Consumer},
 };
+use sqlx::PgPool;
 use std::sync::Arc;
+use task::SageMessage;
 use tokio::sync::broadcast;
 
 fn create_kafka_consumer() -> BaseConsumer {
@@ -43,7 +46,11 @@ fn create_kafka_producer() -> FutureProducer {
     }
 }
 
-async fn process_responses(consumer: BaseConsumer, mut shutdown_rx: broadcast::Receiver<()>) {
+async fn process_responses(
+    consumer: BaseConsumer,
+    db_pool: PgPool,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
@@ -52,25 +59,54 @@ async fn process_responses(consumer: BaseConsumer, mut shutdown_rx: broadcast::R
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                 match consumer.poll(std::time::Duration::from_millis(100)) {
-            Some(Ok(msg)) => {
-                if let Some(payload) = msg.payload() {
-                    if let Ok(buff) = std::str::from_utf8(payload) {
-                        println!(
-                            "Kafka message received: {:?} at offset {:?} from partition {}",
-                            buff,
-                            msg.offset(),
-                            msg.partition()
-                        );
+                    Some(Ok(msg)) => {
+                        if let Some(payload) = msg.payload() {
+                            match serde_json::from_slice::<SageMessage>(payload) {
+                                Ok(sage_msg) => {
+                                    println!(
+                                        "Response received - task_id: {}, task_name: '{}'",
+                                        sage_msg.task_id, sage_msg.task_name
+                                    );
 
-                        let msg: String = buff.to_string();
-                        println!("{}", msg);
-                    } else {
-                        println!("Failed to parse Kafka message payload");
+                                    // Parse envelope as JSON to store in result column
+                                    let result_json: serde_json::Value = match serde_json::from_str(&sage_msg.task_envelope) {
+                                        Ok(json) => json,
+                                        Err(e) => {
+                                            eprintln!("Failed to parse task_envelope as JSON: {}", e);
+                                            continue;
+                                        }
+                                    };
+
+                                    // Create TaskUpdate with the response data
+                                    let task_update = db::TaskUpdate {
+                                        id: sage_msg.task_id,
+                                        status: Some("completed".to_string()),
+                                        started_at: None,
+                                        completed_at: Some(Utc::now()),
+                                        result: Some(result_json),
+                                        error: None,
+                                        worker_id: None,
+                                        retry_count: None,
+                                    };
+
+                                    // Update the task in the database
+                                    match db::update_task(&db_pool, task_update).await {
+                                        Ok(task) => {
+                                            println!("Task {} updated successfully with status: {}", task.id, task.status);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to update task {}: {}", sage_msg.task_id, e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to deserialize SageMessage: {}", e);
+                                }
+                            }
+                        } else {
+                            println!("Received empty Kafka message payload");
+                        }
                     }
-                } else {
-                    println!("Received empty Kafka message payload");
-                }
-            }
                     Some(Err(e)) => {
                         println!("Kafka error: {}", e);
                     }
@@ -117,7 +153,7 @@ async fn main() {
 
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-    let consumer_handle = tokio::spawn(process_responses(consumer, shutdown_rx));
+    let consumer_handle = tokio::spawn(process_responses(consumer, db_pool.clone(), shutdown_rx));
 
     // Setup Ctrl+C handler
     let shutdown_tx_clone = shutdown_tx.clone();

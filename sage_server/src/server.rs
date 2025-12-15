@@ -31,7 +31,7 @@ struct StartResponse {
 struct StartRequest {
     requestor_id: i64,
     task_name: String,
-    task_context: String,
+    task_envelope: String,
     #[serde(default)]
     priority: Option<i32>,
     #[serde(default)]
@@ -50,7 +50,7 @@ async fn start(
         id: task_id,
         requestor_id: payload.requestor_id,
         task_name: payload.task_name.clone(),
-        task_context: payload.task_context.clone(),
+        task_context: payload.task_envelope.clone(),
         priority: payload.priority,
         max_retries: payload.max_retries,
     };
@@ -68,7 +68,7 @@ async fn start(
     let sage_message = SageMessage {
         task_id,
         task_name: payload.task_name,
-        task_context: payload.task_context,
+        task_envelope: payload.task_envelope,
     };
 
     let payload_string =

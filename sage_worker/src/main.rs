@@ -77,8 +77,8 @@ fn get_context(
 ) -> Result<TaskRequestType, Box<dyn std::error::Error + Send>> {
     match message.task_name.as_str() {
         "SampleTask" | "PrimeTask" => {
-            // Deserialize just the data from task_context
-            let data: PrimeTaskData = serde_json::from_str(&message.task_context)
+            // Deserialize just the data from task_envelope
+            let data: PrimeTaskData = serde_json::from_str(&message.task_envelope)
                 .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
 
             // Create TaskRequest with the task_id from SageMessage
@@ -98,16 +98,27 @@ async fn submit_response(
     response: TaskResponseType,
 ) -> Result<(), Box<dyn std::error::Error + Send>> {
     // Pattern match on response type to extract inner data
-    match &response {
+    let response_payload = match &response {
         TaskResponseType::Prime(prime_response) => {
             println!(
                 "{} Response (task_id: {}): {:?}",
-                message.task_name, prime_response.task_id, prime_response.data
+                message.task_name.clone(),
+                prime_response.task_id,
+                prime_response.data
             );
+            let envelope = serde_json::to_string(&prime_response.data)
+                .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
+            (message.task_name.clone(), prime_response.task_id, envelope)
         }
-    }
+    };
 
-    let payload = serde_json::to_string(&response)
+    let sage_message = SageMessage {
+        task_id: response_payload.1,
+        task_name: response_payload.0,
+        task_envelope: response_payload.2,
+    };
+
+    let payload = serde_json::to_string(&sage_message)
         .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
 
     let record = FutureRecord::to("responses")
@@ -293,8 +304,8 @@ fn start_consumer(
                         match serde_json::from_slice::<SageMessage>(payload) {
                             Ok(sage_msg) => {
                                 println!(
-                                    "Received SageMessage: task_name='{}', task_context='{}'",
-                                    sage_msg.task_name, sage_msg.task_context
+                                    "Received SageMessage: task_name='{}', task_envelope='{}'",
+                                    sage_msg.task_name, sage_msg.task_envelope
                                 );
                                 // Use try_send to avoid blocking the Kafka consumer
                                 if let Err(e) = tx.try_send(sage_msg) {
