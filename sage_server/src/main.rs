@@ -1,9 +1,11 @@
 mod db;
 mod server;
+mod task_handler;
+mod types;
 
 use chrono::Utc;
 use rdkafka::config::ClientConfig;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::FutureProducer;
 use rdkafka::{
     Message as RdMesssage,
     consumer::{BaseConsumer, Consumer},
