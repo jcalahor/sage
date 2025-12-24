@@ -1,4 +1,5 @@
 mod db;
+mod scheduled_task_handler;
 mod server;
 mod task_handler;
 mod types;
