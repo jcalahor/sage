@@ -1,8 +1,10 @@
 mod api;
 mod db;
+mod schedule_utils;
 mod server;
 mod types;
 
+use crate::db::ScheduledTaskUpdate;
 use chrono::Utc;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::FutureProducer;
@@ -14,6 +16,59 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use task::SageMessage;
 use tokio::sync::broadcast;
+
+use schedule_utils::{calculate_next_run, validate_cron_expression};
+
+async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut scheduled_tasks = db::get_all_scheduled_tasks(&db_pool)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+    // TODO: Process scheduled_tasks and update their next run times
+    println!("Retrieved {} scheduled tasks", scheduled_tasks.len());
+
+    for scheduled_task in &mut scheduled_tasks {
+        // TODO: Calculate next_run_at and update the scheduled task
+        println!(
+            "Processing scheduled task: {}",
+            scheduled_task.schedule_name
+        );
+
+        match calculate_next_run(&scheduled_task.cron_expression, &scheduled_task.timezone) {
+            Ok(next_run_time) => {
+                scheduled_task.next_run_at = next_run_time;
+
+                db::update_scheduled_task(
+                    &db_pool,
+                    ScheduledTaskUpdate {
+                        id: scheduled_task.id,
+                        schedule_name: None,
+                        task_name: None,
+                        task_context: None,
+                        cron_expression: None,
+                        timezone: None,
+                        enabled: None,
+                        priority: None,
+                        max_retries: None,
+                        last_run_at: None,
+                        next_run_at: Some(next_run_time),
+                        created_by: None,
+                        metadata: None,
+                    },
+                )
+                .await?;
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to calculate next run for scheduled task '{}': {}",
+                    scheduled_task.schedule_name, e
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
 
 fn create_kafka_consumer() -> BaseConsumer {
     match ClientConfig::new()
@@ -146,6 +201,12 @@ async fn main() {
 
     let address = format!("{}:{}", "0.0.0.0", 4000);
     let listener = tokio::net::TcpListener::bind(&address).await.unwrap();
+
+    // set next run for all tasks in case server has been down for a while
+    if let Err(err) = refresh_tasks_schedules(db_pool.clone()).await {
+        eprintln!("Failed to refresh task schedules: {}", err);
+    }
+
     println!("Server started at {}", &address);
     let producer: Arc<FutureProducer> = Arc::new(create_kafka_producer());
     let consumer = create_kafka_consumer();
