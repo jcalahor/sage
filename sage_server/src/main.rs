@@ -4,10 +4,10 @@ mod schedule_utils;
 mod server;
 mod types;
 
-use crate::db::ScheduledTaskUpdate;
+use crate::db::{ScheduledTaskUpdate, TaskCreate, create_task, get_due_scheduled_tasks};
 use chrono::Utc;
 use rdkafka::config::ClientConfig;
-use rdkafka::producer::FutureProducer;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{
     Message as RdMesssage,
     consumer::{BaseConsumer, Consumer},
@@ -16,8 +16,165 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use task::SageMessage;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
-use schedule_utils::{calculate_next_run, validate_cron_expression};
+use schedule_utils::calculate_next_run;
+
+/// Publishes a task to Kafka for processing
+async fn publish_task_to_kafka(
+    producer: &Arc<FutureProducer>,
+    task: &db::Task,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let key = task.requestor_id.to_string();
+
+    let sage_message = SageMessage {
+        task_id: task.id,
+        task_name: task.task_name.clone(),
+        task_envelope: task.task_context.clone(),
+    };
+
+    let payload_string = serde_json::to_string(&sage_message)?;
+
+    let record = FutureRecord::to("input-readings")
+        .key(&key)
+        .payload(&payload_string);
+
+    match producer.send(record, 0).await {
+        Ok(Ok(_)) => {
+            println!(
+                "Scheduled task |{}| sent successfully to topic 'input-readings'",
+                task.task_name
+            );
+            Ok(())
+        }
+        Ok(Err((kafka_error, _))) => {
+            let error_msg = format!("Failed to send scheduled task to Kafka: {}", kafka_error);
+            eprintln!("{}", error_msg);
+            Err(error_msg.into())
+        }
+        Err(e) => {
+            let error_msg = format!("Kafka producer send cancelled: {}", e);
+            eprintln!("{}", error_msg);
+            Err(error_msg.into())
+        }
+    }
+}
+
+/// Runs the scheduler loop, checking for due tasks and publishing them to Kafka
+async fn run_scheduler(
+    producer: Arc<FutureProducer>,
+    db_pool: PgPool,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    println!("Scheduler task started");
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                println!("Scheduler task shutting down...");
+                break;
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                // Query for due tasks
+                match get_due_scheduled_tasks(&db_pool).await {
+                    Ok(due_tasks) => {
+                        if !due_tasks.is_empty() {
+                            println!("Found {} due scheduled tasks", due_tasks.len());
+                        }
+
+                        for scheduled_task in due_tasks {
+                            println!(
+                                "Processing scheduled task: {} (ID: {})",
+                                scheduled_task.schedule_name, scheduled_task.id
+                            );
+
+                            // Create task entry in tasks table
+                            let task_id = Uuid::new_v4();
+                            match create_task(
+                                &db_pool,
+                                TaskCreate {
+                                    id: task_id,
+                                    requestor_id: scheduled_task.requestor_id,
+                                    task_name: scheduled_task.task_name.clone(),
+                                    task_context: scheduled_task.task_context.clone(),
+                                    priority: Some(scheduled_task.priority),
+                                    max_retries: Some(scheduled_task.max_retries),
+                                },
+                            )
+                            .await {
+                                Ok(task) => {
+                                    println!("Created task {} for scheduled task {}", task.id, scheduled_task.schedule_name);
+
+                                    // Publish to Kafka
+                                    if let Err(e) = publish_task_to_kafka(&producer, &task).await {
+                                        eprintln!("Failed to publish task {} to Kafka: {}", task.id, e);
+                                        continue;
+                                    }
+
+                                    // Calculate next run time
+                                    match calculate_next_run(&scheduled_task.cron_expression, &scheduled_task.timezone) {
+                                        Ok(next_run) => {
+                                            // Update scheduled task
+                                            match db::update_scheduled_task(
+                                                &db_pool,
+                                                ScheduledTaskUpdate {
+                                                    id: scheduled_task.id,
+                                                    schedule_name: None,
+                                                    task_name: None,
+                                                    task_context: None,
+                                                    cron_expression: None,
+                                                    timezone: None,
+                                                    enabled: None,
+                                                    priority: None,
+                                                    max_retries: None,
+                                                    last_run_at: Some(Utc::now()),
+                                                    next_run_at: Some(next_run),
+                                                    created_by: None,
+                                                    metadata: None,
+                                                },
+                                            )
+                                            .await {
+                                                Ok(_) => {
+                                                    println!(
+                                                        "Updated scheduled task {} - next run at {}",
+                                                        scheduled_task.schedule_name, next_run
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "Failed to update scheduled task {}: {}",
+                                                        scheduled_task.schedule_name, e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "Failed to calculate next run for scheduled task '{}': {}",
+                                                scheduled_task.schedule_name, e
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "Failed to create task for scheduled task '{}': {}",
+                                        scheduled_task.schedule_name, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to query due scheduled tasks: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Scheduler task terminated");
+}
 
 async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let mut scheduled_tasks = db::get_all_scheduled_tasks(&db_pool)
@@ -215,8 +372,23 @@ async fn main() {
         .expect("topic subscribe failed");
 
     // Create shutdown channel
-    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-    let consumer_handle = tokio::spawn(process_responses(consumer, db_pool.clone(), shutdown_rx));
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(3);
+
+    // Spawn consumer task
+    let shutdown_rx_consumer = shutdown_tx.subscribe();
+    let consumer_handle = tokio::spawn(process_responses(
+        consumer,
+        db_pool.clone(),
+        shutdown_rx_consumer,
+    ));
+
+    // Spawn scheduler task
+    let shutdown_rx_scheduler = shutdown_tx.subscribe();
+    let scheduler_handle = tokio::spawn(run_scheduler(
+        producer.clone(),
+        db_pool.clone(),
+        shutdown_rx_scheduler,
+    ));
 
     // Setup Ctrl+C handler
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -247,12 +419,18 @@ async fn main() {
         }
     }
 
-    // Signal shutdown to consumer
+    // Signal shutdown to all tasks
     let _ = shutdown_tx.send(());
 
-    // Wait for consumer task to finish
+    // Wait for all tasks to finish gracefully
+    println!("Waiting for background tasks to finish...");
+
     if let Err(e) = consumer_handle.await {
         eprintln!("Consumer task error: {}", e);
+    }
+
+    if let Err(e) = scheduler_handle.await {
+        eprintln!("Scheduler task error: {}", e);
     }
 
     println!("Shutdown complete");
