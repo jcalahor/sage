@@ -76,6 +76,7 @@ async fn run_scheduler(
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
                 // Query for due tasks
+                println!("Checking if any tasks needs to run");
                 match get_due_scheduled_tasks(&db_pool).await {
                     Ok(due_tasks) => {
                         if !due_tasks.is_empty() {
