@@ -120,8 +120,6 @@ async fn run_scheduler(
                                                 &db_pool,
                                                 ScheduledTaskUpdate {
                                                     id: scheduled_task.id,
-                                                    schedule_name: None,
-                                                    task_name: None,
                                                     task_context: None,
                                                     cron_expression: None,
                                                     timezone: None,
@@ -200,8 +198,6 @@ async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::err
                     &db_pool,
                     ScheduledTaskUpdate {
                         id: scheduled_task.id,
-                        schedule_name: None,
-                        task_name: None,
                         task_context: None,
                         cron_expression: None,
                         timezone: None,

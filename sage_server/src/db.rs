@@ -82,8 +82,6 @@ pub struct ScheduledTaskCreate {
 #[derive(Debug, Clone)]
 pub struct ScheduledTaskUpdate {
     pub id: Uuid,
-    pub schedule_name: Option<String>,
-    pub task_name: Option<String>,
     pub task_context: Option<String>,
     pub cron_expression: Option<String>,
     pub timezone: Option<String>,
@@ -574,14 +572,6 @@ pub async fn update_scheduled_task(
     let mut updates = Vec::new();
     let mut param_count = 1;
 
-    if schedule_update.schedule_name.is_some() {
-        updates.push(format!("schedule_name = ${}", param_count));
-        param_count += 1;
-    }
-    if schedule_update.task_name.is_some() {
-        updates.push(format!("task_name = ${}", param_count));
-        param_count += 1;
-    }
     if schedule_update.task_context.is_some() {
         updates.push(format!("task_context = ${}", param_count));
         param_count += 1;
@@ -635,12 +625,6 @@ pub async fn update_scheduled_task(
 
     let mut sqlx_query = sqlx::query_as::<_, ScheduledTask>(&query);
 
-    if let Some(schedule_name) = schedule_update.schedule_name {
-        sqlx_query = sqlx_query.bind(schedule_name);
-    }
-    if let Some(task_name) = schedule_update.task_name {
-        sqlx_query = sqlx_query.bind(task_name);
-    }
     if let Some(task_context) = schedule_update.task_context {
         sqlx_query = sqlx_query.bind(task_context);
     }
