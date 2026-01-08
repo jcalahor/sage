@@ -324,6 +324,103 @@ pub struct SageMessage {
    - `result` = parsed JSON from `task_envelope`
 6. **Database persists** → Task result permanently stored
 
+## Task Retry Mechanism
+
+Sage implements automatic retry logic for failed tasks with configurable maximum attempts.
+
+### How Retry Works
+
+When a task fails during execution:
+
+1. **Worker detects failure** → Creates `SageErrorResponse` with error details
+2. **Worker publishes error** → Sends to Kafka `task-errors` topic
+3. **Server error consumer** → Receives error message
+4. **Server checks retry eligibility**:
+   - Fetches task from database
+   - Calculates `new_retry_count = retry_count + 1`
+   - If `is_retryable` AND `new_retry_count <= max_retries`:
+     - Updates retry count in database
+     - Republishes task to `input-readings` for retry
+   - Else:
+     - Marks task as permanently failed (status = "error")
+
+### Configuration
+
+Tasks can specify custom retry limits:
+
+```bash
+curl -X POST http://localhost:4000/tasks/v1/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "requestor_id": 12345,
+    "task_name": "PrimeTask",
+    "task_context": "{\"limit\": 10000}",
+    "max_retries": 5
+  }'
+```
+
+**Default:** `max_retries = 3`
+
+### Retry Flow Diagram
+
+```
+Task Fails
+    │
+    ▼
+Worker sends error to 'task-errors' topic
+    │
+    ▼
+Server Error Consumer
+    │
+    ├─→ retry_count <= max_retries?
+    │       │
+    │       ├─→ YES: Increment retry_count
+    │       │        Republish to 'input-readings'
+    │       │        Worker retries task
+    │       │
+    │       └─→ NO:  Mark as 'error' status
+    │                Store final error message
+    │                Task permanently failed
+```
+
+### Example Scenarios
+
+**Scenario 1: Task succeeds after 2 retries**
+- Attempt 1: Fails (network timeout) → retry_count = 1
+- Attempt 2: Fails (network timeout) → retry_count = 2
+- Attempt 3: Succeeds → status = "completed", retry_count = 2
+
+**Scenario 2: Task exhausts all retries**
+- Attempt 1-4: All fail
+- Final: status = "error", retry_count = 4 (exceeds max_retries = 3)
+
+**Scenario 3: Non-retryable error**
+- Worker sets `is_retryable = false`
+- Server immediately marks as "error" without retry
+
+### Kafka Topics for Retry
+
+| Topic | Purpose |
+|-------|---------|
+| `input-readings` | Task queue (initial + retries) |
+| `responses` | Successful task results |
+| `task-errors` | Failed task errors (triggers retry logic) |
+
+### Monitoring Retries
+
+```sql
+-- View tasks with retries
+SELECT id, task_name, retry_count, max_retries, status, error
+FROM tasks
+WHERE retry_count > 0
+ORDER BY retry_count DESC;
+
+-- Tasks that failed permanently
+SELECT id, task_name, retry_count, error
+FROM tasks
+WHERE status = 'error';
+```
+
 ## Components
 
 ### sage_server
@@ -371,7 +468,7 @@ A background worker that:
 - [x] PostgreSQL result backend with task persistence
 - [x] Task status constraints (pending, completed, error)
 - [x] Response processing and database updates
-- [ ] Task retry mechanism
+- [x] **Task retry mechanism with configurable max attempts**
 - [ ] Priority queues
 - [ ] Task scheduling (cron-like)
 - [ ] Monitoring and metrics

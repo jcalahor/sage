@@ -8,7 +8,7 @@ use std::error::Error;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use task::{SageMessage, SageTask, TaskRequest, TaskResponse};
+use task::{SageErrorResponse, SageMessage, SageTask, TaskRequest, TaskResponse};
 use tasks_impl::{PrimeTask, PrimeTaskData, PrimeTaskResponseData, SampleTask};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
@@ -150,6 +150,50 @@ async fn submit_response(
     }
 }
 
+async fn submit_error_response(
+    producer: Arc<FutureProducer>,
+    message: &SageMessage,
+    error: Box<dyn std::error::Error + Send>,
+) -> Result<(), Box<dyn std::error::Error + Send>> {
+    let error_response = SageErrorResponse {
+        task_id: message.task_id,
+        task_name: message.task_name.clone(),
+        error_message: error.to_string(),
+        is_retryable: true, // Consider all errors retryable for now
+    };
+
+    let payload = serde_json::to_string(&error_response)
+        .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
+
+    let record = FutureRecord::to("task-errors")
+        .payload(&payload)
+        .key(&message.task_name);
+
+    match producer.send(record, 0).await {
+        Ok(Ok(_)) => {
+            println!(
+                "Error response sent successfully to topic 'task-errors' for task_id: {}",
+                message.task_id
+            );
+            Ok(())
+        }
+        Ok(Err((e, _))) => {
+            eprintln!("Failed to send error response: {:?}", e);
+            Err(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to send error to Kafka: {:?}", e),
+            )))
+        }
+        Err(e) => {
+            eprintln!("Kafka error send future canceled: {:?}", e);
+            Err(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Kafka error send canceled: {:?}", e),
+            )))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -203,13 +247,18 @@ async fn main() {
                                 message.task_name
                             );
                             if let Err(e) =
-                                submit_response(producer_clone, &message, response).await
+                                submit_response(producer_clone.clone(), &message, response).await
                             {
                                 eprintln!("Failed to submit response: {}", e);
                             }
                         }
                         Ok(Err((message, error))) => {
                             eprintln!("Task '{}' failed: {}", message.task_name, error);
+                            if let Err(e) =
+                                submit_error_response(producer_clone, &message, error).await
+                            {
+                                eprintln!("Failed to submit error response: {}", e);
+                            }
                         }
                         Err(e) => {
                             eprintln!("Blocking task panicked: {}", e);
@@ -241,12 +290,18 @@ async fn main() {
                             "Task '{}' completed successfully (spawn)",
                             message.task_name
                         );
-                        if let Err(e) = submit_response(producer_clone, &message, response).await {
+                        if let Err(e) =
+                            submit_response(producer_clone.clone(), &message, response).await
+                        {
                             eprintln!("Failed to submit response: {}", e);
                         }
                     }
                     Ok(Err((message, error))) => {
                         eprintln!("Task '{}' failed: {}", message.task_name, error);
+                        if let Err(e) = submit_error_response(producer_clone, &message, error).await
+                        {
+                            eprintln!("Failed to submit error response: {}", e);
+                        }
                     }
                     Err(e) => {
                         eprintln!("Async task panicked: {}", e);

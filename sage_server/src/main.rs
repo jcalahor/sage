@@ -14,7 +14,7 @@ use rdkafka::{
 };
 use sqlx::PgPool;
 use std::sync::Arc;
-use task::SageMessage;
+use task::{SageErrorResponse, SageMessage};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -329,6 +329,135 @@ async fn process_responses(
     println!("Consumer task terminated");
 }
 
+async fn process_errors(
+    consumer: BaseConsumer,
+    producer: Arc<FutureProducer>,
+    db_pool: PgPool,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    println!("Error consumer task started");
+
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                println!("Error consumer task shutting down...");
+                break;
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                match consumer.poll(std::time::Duration::from_millis(100)) {
+                    Some(Ok(msg)) => {
+                        if let Some(payload) = msg.payload() {
+                            match serde_json::from_slice::<SageErrorResponse>(payload) {
+                                Ok(error_response) => {
+                                    println!(
+                                        "Error received - task_id: {}, task_name: '{}', error: '{}'",
+                                        error_response.task_id, error_response.task_name, error_response.error_message
+                                    );
+
+                                    // Fetch the task from database to check retry count
+                                    match db::get_task_by_id(&db_pool, error_response.task_id).await {
+                                        Ok(Some(task)) => {
+                                            let new_retry_count = task.retry_count + 1;
+
+                                            // Check if we should retry
+                                            if error_response.is_retryable && new_retry_count <= task.max_retries {
+                                                println!(
+                                                    "Task {} failed (attempt {}/{}), retrying...",
+                                                    task.id, new_retry_count, task.max_retries
+                                                );
+
+                                                // Update retry count in database
+                                                let task_update = db::TaskUpdate {
+                                                    id: task.id,
+                                                    status: None, // Keep as pending
+                                                    started_at: None,
+                                                    completed_at: None,
+                                                    result: None,
+                                                    error: Some(format!(
+                                                        "Attempt {}/{}: {}",
+                                                        new_retry_count, task.max_retries, error_response.error_message
+                                                    )),
+                                                    worker_id: None,
+                                                    retry_count: Some(new_retry_count),
+                                                };
+
+                                                match db::update_task(&db_pool, task_update).await {
+                                                    Ok(updated_task) => {
+                                                        println!("Task {} retry count updated to {}", updated_task.id, updated_task.retry_count);
+
+                                                        // Republish task to Kafka for retry
+                                                        if let Err(e) = publish_task_to_kafka(&producer, &updated_task).await {
+                                                            eprintln!("Failed to republish task {} for retry: {}", updated_task.id, e);
+                                                        } else {
+                                                            println!("Task {} republished for retry", updated_task.id);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("Failed to update retry count for task {}: {}", task.id, e);
+                                                    }
+                                                }
+                                            } else {
+                                                // Max retries exceeded or not retryable
+                                                let reason = if error_response.is_retryable {
+                                                    format!(
+                                                        "Max retries ({}) exceeded. Last error: {}",
+                                                        task.max_retries, error_response.error_message
+                                                    )
+                                                } else {
+                                                    format!("Non-retryable error: {}", error_response.error_message)
+                                                };
+
+                                                println!(
+                                                    "Task {} permanently failed: {}",
+                                                    task.id, reason
+                                                );
+
+                                                let task_update = db::TaskUpdate {
+                                                    id: task.id,
+                                                    status: Some("error".to_string()),
+                                                    started_at: None,
+                                                    completed_at: Some(Utc::now()),
+                                                    result: None,
+                                                    error: Some(reason),
+                                                    worker_id: None,
+                                                    retry_count: Some(new_retry_count),
+                                                };
+
+                                                match db::update_task(&db_pool, task_update).await {
+                                                    Ok(_) => {
+                                                        println!("Task {} marked as permanently failed", task.id);
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("Failed to update task {} to error status: {}", task.id, e);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Ok(None) => {
+                                            eprintln!("Task {} not found in database", error_response.task_id);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to fetch task {} from database: {}", error_response.task_id, e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to deserialize SageErrorResponse: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("Kafka error in error consumer: {}", e);
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+    println!("Error consumer task terminated");
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize database connection
@@ -363,20 +492,37 @@ async fn main() {
 
     println!("Server started at {}", &address);
     let producer: Arc<FutureProducer> = Arc::new(create_kafka_producer());
+
+    // Create response consumer
     let consumer = create_kafka_consumer();
     consumer
         .subscribe(&["responses"])
         .expect("topic subscribe failed");
 
-    // Create shutdown channel
-    let (shutdown_tx, shutdown_rx) = broadcast::channel(3);
+    // Create error consumer
+    let error_consumer = create_kafka_consumer();
+    error_consumer
+        .subscribe(&["task-errors"])
+        .expect("task-errors topic subscribe failed");
 
-    // Spawn consumer task
+    // Create shutdown channel (4 tasks: response consumer, error consumer, scheduler, server)
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(4);
+
+    // Spawn response consumer task
     let shutdown_rx_consumer = shutdown_tx.subscribe();
     let consumer_handle = tokio::spawn(process_responses(
         consumer,
         db_pool.clone(),
         shutdown_rx_consumer,
+    ));
+
+    // Spawn error consumer task
+    let shutdown_rx_error_consumer = shutdown_tx.subscribe();
+    let error_consumer_handle = tokio::spawn(process_errors(
+        error_consumer,
+        producer.clone(),
+        db_pool.clone(),
+        shutdown_rx_error_consumer,
     ));
 
     // Spawn scheduler task
@@ -424,6 +570,10 @@ async fn main() {
 
     if let Err(e) = consumer_handle.await {
         eprintln!("Consumer task error: {}", e);
+    }
+
+    if let Err(e) = error_consumer_handle.await {
+        eprintln!("Error consumer task error: {}", e);
     }
 
     if let Err(e) = scheduler_handle.await {

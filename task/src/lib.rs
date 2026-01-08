@@ -44,6 +44,15 @@ pub struct SageMessage {
     pub task_envelope: String,
 }
 
+/// Error response structure for failed tasks
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SageErrorResponse {
+    pub task_id: Uuid,
+    pub task_name: String,
+    pub error_message: String,
+    pub is_retryable: bool,
+}
+
 #[async_trait]
 pub trait SageTask<T, R> {
     async fn run(
