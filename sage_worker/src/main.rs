@@ -247,7 +247,7 @@ async fn main() {
                                 message.task_name
                             );
                             if let Err(e) =
-                                submit_response(producer_clone.clone(), &message, response).await
+                                submit_response(producer_clone, &message, response).await
                             {
                                 eprintln!("Failed to submit response: {}", e);
                             }
@@ -290,9 +290,7 @@ async fn main() {
                             "Task '{}' completed successfully (spawn)",
                             message.task_name
                         );
-                        if let Err(e) =
-                            submit_response(producer_clone.clone(), &message, response).await
-                        {
+                        if let Err(e) = submit_response(producer_clone, &message, response).await {
                             eprintln!("Failed to submit response: {}", e);
                         }
                     }
