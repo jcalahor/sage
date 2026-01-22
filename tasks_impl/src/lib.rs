@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use log::info;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -23,7 +24,7 @@ impl SageTask<PrimeTaskData, PrimeTaskResponseData> for SampleTask {
         &self,
         request: &task::TaskRequest<PrimeTaskData>,
     ) -> Result<TaskResponse<PrimeTaskResponseData>, Box<dyn std::error::Error + Send>> {
-        println!("Running task with request value: {}", request.data.limit);
+        info!("Running task with request value: {}", request.data.limit);
         Ok(TaskResponse::new(
             request.task_id,
             PrimeTaskResponseData { prime_founds: 0 },
@@ -63,7 +64,7 @@ impl SageTask<PrimeTaskData, PrimeTaskResponseData> for PrimeTask {
             .filter(|&n| is_prime(n))
             .collect();
         let duration_par = start.elapsed();
-        println!(
+        info!(
             "Rayon parallel: Found {} primes in {:?} for array of {:?} items",
             primes_par.len(),
             duration_par,

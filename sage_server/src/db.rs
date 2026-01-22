@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use log::info;
 use serde_json::Value as JsonValue;
 use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -296,7 +297,7 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    println!("Database initialized successfully");
+    info!("Database initialized successfully");
     Ok(())
 }
 

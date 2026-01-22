@@ -286,8 +286,8 @@ async fn process_responses(
                             match serde_json::from_slice::<SageMessage>(payload) {
                                 Ok(sage_msg) => {
                                     info!(
-                                        "Response received - task_id: {}, task_name: '{}'",
-                                        sage_msg.task_id, sage_msg.task_name
+                                        "Response received - task_id: {}, task_name: '{}', response: {}",
+                                        sage_msg.task_id, sage_msg.task_name, sage_msg.task_envelope
                                     );
 
                                     // Parse envelope as JSON to store in result column
@@ -476,8 +476,9 @@ async fn main() {
 
     // Initialize logging
     let pid = std::process::id();
+    std::fs::create_dir_all("log").expect("Failed to create log directory");
     let log_file =
-        File::create(format!("sage_server_{}.log", pid)).expect("Failed to create log file");
+        File::create(format!("log/sage_server_{}.log", pid)).expect("Failed to create log file");
 
     CombinedLogger::init(vec![WriteLogger::new(
         LevelFilter::Info,

@@ -1,6 +1,6 @@
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
 use chrono::{DateTime, Utc};
-
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -132,7 +132,7 @@ async fn create_schedule(
 
     match create_scheduled_task(&state.db_pool, schedule_create).await {
         Ok(scheduled_task) => {
-            println!(
+            info!(
                 "Scheduled task created: {} - Next run at: {}",
                 scheduled_task.id, scheduled_task.next_run_at
             );
@@ -146,7 +146,7 @@ async fn create_schedule(
             (StatusCode::CREATED, Json(response)).into_response()
         }
         Err(e) => {
-            eprintln!("Failed to create scheduled task in database: {}", e);
+            error!("Failed to create scheduled task in database: {}", e);
             let error_response = ErrorResponse {
                 status: false,
                 error: format!("Database error: {}", e),
@@ -171,7 +171,7 @@ async fn edit_schedule(
             return (StatusCode::NOT_FOUND, Json(error_response)).into_response();
         }
         Err(e) => {
-            eprintln!("Failed to fetch scheduled task: {}", e);
+            error!("Failed to fetch scheduled task: {}", e);
             let error_response = ErrorResponse {
                 status: false,
                 error: format!("Database error: {}", e),
@@ -231,7 +231,7 @@ async fn edit_schedule(
 
     match update_scheduled_task(&state.db_pool, schedule_update).await {
         Ok(updated_task) => {
-            println!(
+            info!(
                 "Scheduled task updated: {} - Next run at: {}",
                 updated_task.id, updated_task.next_run_at
             );
@@ -245,7 +245,7 @@ async fn edit_schedule(
             (StatusCode::OK, Json(response)).into_response()
         }
         Err(e) => {
-            eprintln!("Failed to update scheduled task in database: {}", e);
+            error!("Failed to update scheduled task in database: {}", e);
             let error_response = ErrorResponse {
                 status: false,
                 error: format!("Database error: {}", e),
@@ -270,7 +270,7 @@ async fn toggle_schedule_status(
             return (StatusCode::NOT_FOUND, Json(error_response)).into_response();
         }
         Err(e) => {
-            eprintln!("Failed to fetch scheduled task: {}", e);
+            error!("Failed to fetch scheduled task: {}", e);
             let error_response = ErrorResponse {
                 status: false,
                 error: format!("Database error: {}", e),
@@ -317,7 +317,7 @@ async fn toggle_schedule_status(
             } else {
                 "deactivated"
             };
-            println!("Scheduled task {}: {}", status_text, updated_task.id);
+            info!("Scheduled task {}: {}", status_text, updated_task.id);
 
             let response = ScheduleStatusResponse {
                 status: true,
@@ -334,7 +334,7 @@ async fn toggle_schedule_status(
             } else {
                 "deactivate"
             };
-            eprintln!(
+            error!(
                 "Failed to {} scheduled task in database: {}",
                 status_text, e
             );

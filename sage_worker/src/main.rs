@@ -213,8 +213,9 @@ async fn main() {
 
     // Initialize logging
     let pid = std::process::id();
+    std::fs::create_dir_all("log").expect("Failed to create log directory");
     let log_file =
-        File::create(format!("sage_worker_{}.log", pid)).expect("Failed to create log file");
+        File::create(format!("log/sage_worker_{}.log", pid)).expect("Failed to create log file");
 
     CombinedLogger::init(vec![WriteLogger::new(
         LevelFilter::Info,

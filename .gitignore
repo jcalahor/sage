@@ -29,9 +29,7 @@ Cargo.lock
 .env.local
 
 # Log files
-*.log
-sage_server_*.log
-sage_worker_*.log
+log/
 
 # Testing
 *.profraw

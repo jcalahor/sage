@@ -1,4 +1,5 @@
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
+use log::{error, info};
 use rdkafka::producer::FutureRecord;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -44,10 +45,10 @@ async fn start(
 
     match db::create_task(&state.db_pool, task_create).await {
         Ok(task) => {
-            println!("Task created in database: {:?}", task.id);
+            info!("Task created in database: {:?}", task.id);
         }
         Err(e) => {
-            eprintln!("Failed to create task in database: {}", e);
+            error!("Failed to create task in database: {}", e);
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
@@ -73,13 +74,13 @@ async fn start(
         .await
     {
         Ok(_) => {
-            println!(
+            info!(
                 "Message |{}| sent successfully to topic '{}'",
                 &payload_string, "input-readings"
             );
         }
         Err(e) => {
-            println!("Failed to send message: {}", e);
+            info!("Failed to send message: {}", e);
         }
     }
 
