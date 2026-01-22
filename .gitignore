@@ -28,6 +28,11 @@ Cargo.lock
 .env
 .env.local
 
+# Log files
+*.log
+sage_server_*.log
+sage_worker_*.log
+
 # Testing
 *.profraw
 *.profdata

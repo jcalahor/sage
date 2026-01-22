@@ -6,13 +6,16 @@ mod types;
 
 use crate::db::{ScheduledTaskUpdate, TaskCreate, create_task, get_due_scheduled_tasks};
 use chrono::Utc;
+use log::{error, info, warn};
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::{
     Message as RdMesssage,
     consumer::{BaseConsumer, Consumer},
 };
+use simplelog::*;
 use sqlx::PgPool;
+use std::fs::File;
 use std::sync::Arc;
 use task::{SageErrorResponse, SageMessage};
 use tokio::sync::broadcast;
@@ -26,6 +29,8 @@ async fn publish_task_to_kafka(
     task: &db::Task,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let key = task.requestor_id.to_string();
+    let topic = std::env::var("KAFKA_TOPIC_INPUT")
+        .expect("KAFKA_TOPIC_INPUT must be set in environment or .env file");
 
     let sage_message = SageMessage {
         task_id: task.id,
@@ -35,26 +40,24 @@ async fn publish_task_to_kafka(
 
     let payload_string = serde_json::to_string(&sage_message)?;
 
-    let record = FutureRecord::to("input-readings")
-        .key(&key)
-        .payload(&payload_string);
+    let record = FutureRecord::to(&topic).key(&key).payload(&payload_string);
 
     match producer.send(record, 0).await {
         Ok(Ok(_)) => {
-            println!(
-                "Scheduled task |{}| sent successfully to topic 'input-readings'",
-                task.task_name
+            info!(
+                "Scheduled task |{}| sent successfully to topic '{}'",
+                task.task_name, topic
             );
             Ok(())
         }
         Ok(Err((kafka_error, _))) => {
             let error_msg = format!("Failed to send scheduled task to Kafka: {}", kafka_error);
-            eprintln!("{}", error_msg);
+            error!("{}", error_msg);
             Err(error_msg.into())
         }
         Err(e) => {
             let error_msg = format!("Kafka producer send cancelled: {}", e);
-            eprintln!("{}", error_msg);
+            error!("{}", error_msg);
             Err(error_msg.into())
         }
     }
@@ -66,25 +69,25 @@ async fn run_scheduler(
     db_pool: PgPool,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
-    println!("Scheduler task started");
+    info!("Scheduler task started");
 
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
-                println!("Scheduler task shutting down...");
+                info!("Scheduler task shutting down...");
                 break;
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
                 // Query for due tasks
-                println!("Checking if any tasks needs to run");
+                info!("Checking if any tasks needs to run");
                 match get_due_scheduled_tasks(&db_pool).await {
                     Ok(due_tasks) => {
                         if !due_tasks.is_empty() {
-                            println!("Found {} due scheduled tasks", due_tasks.len());
+                            info!("Found {} due scheduled tasks", due_tasks.len());
                         }
 
                         for scheduled_task in due_tasks {
-                            println!(
+                            info!(
                                 "Processing scheduled task: {} (ID: {})",
                                 scheduled_task.schedule_name, scheduled_task.id
                             );
@@ -104,11 +107,11 @@ async fn run_scheduler(
                             )
                             .await {
                                 Ok(task) => {
-                                    println!("Created task {} for scheduled task {}", task.id, scheduled_task.schedule_name);
+                                    info!("Created task {} for scheduled task {}", task.id, scheduled_task.schedule_name);
 
                                     // Publish to Kafka
                                     if let Err(e) = publish_task_to_kafka(&producer, &task).await {
-                                        eprintln!("Failed to publish task {} to Kafka: {}", task.id, e);
+                                        error!("Failed to publish task {} to Kafka: {}", task.id, e);
                                         continue;
                                     }
 
@@ -134,13 +137,13 @@ async fn run_scheduler(
                                             )
                                             .await {
                                                 Ok(_) => {
-                                                    println!(
+                                                    info!(
                                                         "Updated scheduled task {} - next run at {}",
                                                         scheduled_task.schedule_name, next_run
                                                     );
                                                 }
                                                 Err(e) => {
-                                                    eprintln!(
+                                                    error!(
                                                         "Failed to update scheduled task {}: {}",
                                                         scheduled_task.schedule_name, e
                                                     );
@@ -148,7 +151,7 @@ async fn run_scheduler(
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!(
+                                            error!(
                                                 "Failed to calculate next run for scheduled task '{}': {}",
                                                 scheduled_task.schedule_name, e
                                             );
@@ -156,7 +159,7 @@ async fn run_scheduler(
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!(
+                                    error!(
                                         "Failed to create task for scheduled task '{}': {}",
                                         scheduled_task.schedule_name, e
                                     );
@@ -165,14 +168,14 @@ async fn run_scheduler(
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to query due scheduled tasks: {}", e);
+                        error!("Failed to query due scheduled tasks: {}", e);
                     }
                 }
             }
         }
     }
 
-    println!("Scheduler task terminated");
+    info!("Scheduler task terminated");
 }
 
 async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -181,11 +184,11 @@ async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::err
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     // TODO: Process scheduled_tasks and update their next run times
-    println!("Retrieved {} scheduled tasks", scheduled_tasks.len());
+    info!("Retrieved {} scheduled tasks", scheduled_tasks.len());
 
     for scheduled_task in &mut scheduled_tasks {
         // TODO: Calculate next_run_at and update the scheduled task
-        println!(
+        info!(
             "Processing scheduled task: {}",
             scheduled_task.schedule_name
         );
@@ -213,7 +216,7 @@ async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::err
                 .await?;
             }
             Err(e) => {
-                eprintln!(
+                error!(
                     "Failed to calculate next run for scheduled task '{}': {}",
                     scheduled_task.schedule_name, e
                 );
@@ -225,33 +228,41 @@ async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::err
 }
 
 fn create_kafka_consumer() -> BaseConsumer {
+    let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+        .expect("KAFKA_BOOTSTRAP_SERVERS must be set in environment or .env file");
+    let group_id = std::env::var("KAFKA_SERVER_GROUP_ID")
+        .expect("KAFKA_SERVER_GROUP_ID must be set in environment or .env file");
+
     match ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092") // Replace with actual config
-        .set("group.id", "sage_server") // Replace with actual group ID
+        .set("bootstrap.servers", &bootstrap_servers)
+        .set("group.id", &group_id)
         .create::<BaseConsumer>()
     {
         Ok(consumer) => {
-            println!("Kafka consumer successfully created!");
+            info!("Kafka consumer successfully created!");
             consumer
         }
         Err(err) => {
-            println!("Failed to create Kafka consumer: {}", err);
+            info!("Failed to create Kafka consumer: {}", err);
             panic!("Kafka consumer creation failed");
         }
     }
 }
 
 fn create_kafka_producer() -> FutureProducer {
+    let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+        .expect("KAFKA_BOOTSTRAP_SERVERS must be set in environment or .env file");
+
     match ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
+        .set("bootstrap.servers", &bootstrap_servers)
         .create::<FutureProducer>()
     {
         Ok(producer) => {
-            println!("Kafka producer successfully created!");
+            info!("Kafka producer successfully created!");
             producer
         }
         Err(err) => {
-            println!("Failed to create Kafka producer: {}", err);
+            info!("Failed to create Kafka producer: {}", err);
             panic!("Kafka producer creation failed");
         }
     }
@@ -265,7 +276,7 @@ async fn process_responses(
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
-                println!("Consumer task shutting down...");
+                info!("Consumer task shutting down...");
                 break;
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
@@ -274,7 +285,7 @@ async fn process_responses(
                         if let Some(payload) = msg.payload() {
                             match serde_json::from_slice::<SageMessage>(payload) {
                                 Ok(sage_msg) => {
-                                    println!(
+                                    info!(
                                         "Response received - task_id: {}, task_name: '{}'",
                                         sage_msg.task_id, sage_msg.task_name
                                     );
@@ -283,7 +294,7 @@ async fn process_responses(
                                     let result_json: serde_json::Value = match serde_json::from_str(&sage_msg.task_envelope) {
                                         Ok(json) => json,
                                         Err(e) => {
-                                            eprintln!("Failed to parse task_envelope as JSON: {}", e);
+                                            error!("Failed to parse task_envelope as JSON: {}", e);
                                             continue;
                                         }
                                     };
@@ -303,30 +314,30 @@ async fn process_responses(
                                     // Update the task in the database
                                     match db::update_task(&db_pool, task_update).await {
                                         Ok(task) => {
-                                            println!("Task {} updated successfully with status: {}", task.id, task.status);
+                                            info!("Task {} updated successfully with status: {}", task.id, task.status);
                                         }
                                         Err(e) => {
-                                            eprintln!("Failed to update task {}: {}", sage_msg.task_id, e);
+                                            error!("Failed to update task {}: {}", sage_msg.task_id, e);
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to deserialize SageMessage: {}", e);
+                                    error!("Failed to deserialize SageMessage: {}", e);
                                 }
                             }
                         } else {
-                            println!("Received empty Kafka message payload");
+                            info!("Received empty Kafka message payload");
                         }
                     }
                     Some(Err(e)) => {
-                        println!("Kafka error: {}", e);
+                        info!("Kafka error: {}", e);
                     }
                     None => {}
                 }
             }
         }
     }
-    println!("Consumer task terminated");
+    info!("Consumer task terminated");
 }
 
 async fn process_errors(
@@ -335,12 +346,12 @@ async fn process_errors(
     db_pool: PgPool,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
-    println!("Error consumer task started");
+    info!("Error consumer task started");
 
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
-                println!("Error consumer task shutting down...");
+                info!("Error consumer task shutting down...");
                 break;
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
@@ -349,7 +360,7 @@ async fn process_errors(
                         if let Some(payload) = msg.payload() {
                             match serde_json::from_slice::<SageErrorResponse>(payload) {
                                 Ok(error_response) => {
-                                    println!(
+                                    info!(
                                         "Error received - task_id: {}, task_name: '{}', error: '{}'",
                                         error_response.task_id, error_response.task_name, error_response.error_message
                                     );
@@ -361,7 +372,7 @@ async fn process_errors(
 
                                             // Check if we should retry
                                             if error_response.is_retryable && new_retry_count <= task.max_retries {
-                                                println!(
+                                                info!(
                                                     "Task {} failed (attempt {}/{}), retrying...",
                                                     task.id, new_retry_count, task.max_retries
                                                 );
@@ -383,17 +394,17 @@ async fn process_errors(
 
                                                 match db::update_task(&db_pool, task_update).await {
                                                     Ok(updated_task) => {
-                                                        println!("Task {} retry count updated to {}", updated_task.id, updated_task.retry_count);
+                                                        info!("Task {} retry count updated to {}", updated_task.id, updated_task.retry_count);
 
                                                         // Republish task to Kafka for retry
                                                         if let Err(e) = publish_task_to_kafka(&producer, &updated_task).await {
-                                                            eprintln!("Failed to republish task {} for retry: {}", updated_task.id, e);
+                                                            error!("Failed to republish task {} for retry: {}", updated_task.id, e);
                                                         } else {
-                                                            println!("Task {} republished for retry", updated_task.id);
+                                                            info!("Task {} republished for retry", updated_task.id);
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        eprintln!("Failed to update retry count for task {}: {}", task.id, e);
+                                                        error!("Failed to update retry count for task {}: {}", task.id, e);
                                                     }
                                                 }
                                             } else {
@@ -407,7 +418,7 @@ async fn process_errors(
                                                     format!("Non-retryable error: {}", error_response.error_message)
                                                 };
 
-                                                println!(
+                                                info!(
                                                     "Task {} permanently failed: {}",
                                                     task.id, reason
                                                 );
@@ -425,85 +436,112 @@ async fn process_errors(
 
                                                 match db::update_task(&db_pool, task_update).await {
                                                     Ok(_) => {
-                                                        println!("Task {} marked as permanently failed", task.id);
+                                                        info!("Task {} marked as permanently failed", task.id);
                                                     }
                                                     Err(e) => {
-                                                        eprintln!("Failed to update task {} to error status: {}", task.id, e);
+                                                        error!("Failed to update task {} to error status: {}", task.id, e);
                                                     }
                                                 }
                                             }
                                         }
                                         Ok(None) => {
-                                            eprintln!("Task {} not found in database", error_response.task_id);
+                                            error!("Task {} not found in database", error_response.task_id);
                                         }
                                         Err(e) => {
-                                            eprintln!("Failed to fetch task {} from database: {}", error_response.task_id, e);
+                                            error!("Failed to fetch task {} from database: {}", error_response.task_id, e);
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to deserialize SageErrorResponse: {}", e);
+                                    error!("Failed to deserialize SageErrorResponse: {}", e);
                                 }
                             }
                         }
                     }
                     Some(Err(e)) => {
-                        eprintln!("Kafka error in error consumer: {}", e);
+                        error!("Kafka error in error consumer: {}", e);
                     }
                     None => {}
                 }
             }
         }
     }
-    println!("Error consumer task terminated");
+    info!("Error consumer task terminated");
 }
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+
+    // Initialize logging
+    let pid = std::process::id();
+    let log_file =
+        File::create(format!("sage_server_{}.log", pid)).expect("Failed to create log file");
+
+    CombinedLogger::init(vec![WriteLogger::new(
+        LevelFilter::Info,
+        Config::default(),
+        log_file,
+    )])
+    .expect("Failed to initialize logger");
+
+    info!("Sage Server starting (PID: {})", pid);
+
     // Initialize database connection
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sage:sage_password@localhost:5432/sage_db".to_string());
+        .expect("DATABASE_URL must be set in environment or .env file");
 
-    println!("Connecting to database...");
+    info!("Connecting to database...");
     let db_pool = match db::create_pool(&database_url).await {
         Ok(pool) => {
-            println!("Database connection established!");
+            info!("Database connection established!");
             pool
         }
         Err(err) => {
-            eprintln!("Failed to connect to database: {}", err);
+            error!("Failed to connect to database: {}", err);
             panic!("Database connection failed");
         }
     };
 
     // Initialize database schema
     if let Err(err) = db::init_db(&db_pool).await {
-        eprintln!("Failed to initialize database: {}", err);
+        error!("Failed to initialize database: {}", err);
         panic!("Database initialization failed");
     }
 
-    let address = format!("{}:{}", "0.0.0.0", 4000);
+    let server_host =
+        std::env::var("SERVER_HOST").expect("SERVER_HOST must be set in environment or .env file");
+    let server_port =
+        std::env::var("SERVER_PORT").expect("SERVER_PORT must be set in environment or .env file");
+    let address = format!("{}:{}", server_host, server_port);
     let listener = tokio::net::TcpListener::bind(&address).await.unwrap();
 
     // set next run for all tasks in case server has been down for a while
     if let Err(err) = refresh_tasks_schedules(db_pool.clone()).await {
-        eprintln!("Failed to refresh task schedules: {}", err);
+        error!("Failed to refresh task schedules: {}", err);
     }
 
-    println!("Server started at {}", &address);
+    info!("Server started at {}", &address);
     let producer: Arc<FutureProducer> = Arc::new(create_kafka_producer());
+
+    // Get Kafka topic names from environment
+    let responses_topic = std::env::var("KAFKA_TOPIC_RESPONSES")
+        .expect("KAFKA_TOPIC_RESPONSES must be set in environment or .env file");
+    let errors_topic = std::env::var("KAFKA_TOPIC_ERRORS")
+        .expect("KAFKA_TOPIC_ERRORS must be set in environment or .env file");
 
     // Create response consumer
     let consumer = create_kafka_consumer();
     consumer
-        .subscribe(&["responses"])
+        .subscribe(&[&responses_topic])
         .expect("topic subscribe failed");
 
     // Create error consumer
     let error_consumer = create_kafka_consumer();
     error_consumer
-        .subscribe(&["task-errors"])
-        .expect("task-errors topic subscribe failed");
+        .subscribe(&[&errors_topic])
+        .expect("topic subscribe failed");
 
     // Create shutdown channel (4 tasks: response consumer, error consumer, scheduler, server)
     let (shutdown_tx, shutdown_rx) = broadcast::channel(4);
@@ -539,7 +577,7 @@ async fn main() {
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to listen for Ctrl+C");
-        println!("\nReceived Ctrl+C, initiating graceful shutdown...");
+        info!("\nReceived Ctrl+C, initiating graceful shutdown...");
         let _ = shutdown_tx_clone.send(());
     });
 
@@ -554,11 +592,11 @@ async fn main() {
     tokio::select! {
         result = server => {
             if let Err(e) = result {
-                eprintln!("Server error: {}", e);
+                error!("Server error: {}", e);
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            println!("\nReceived Ctrl+C, shutting down server...");
+            info!("\nReceived Ctrl+C, shutting down server...");
         }
     }
 
@@ -566,19 +604,19 @@ async fn main() {
     let _ = shutdown_tx.send(());
 
     // Wait for all tasks to finish gracefully
-    println!("Waiting for background tasks to finish...");
+    info!("Waiting for background tasks to finish...");
 
     if let Err(e) = consumer_handle.await {
-        eprintln!("Consumer task error: {}", e);
+        error!("Consumer task error: {}", e);
     }
 
     if let Err(e) = error_consumer_handle.await {
-        eprintln!("Error consumer task error: {}", e);
+        error!("Error consumer task error: {}", e);
     }
 
     if let Err(e) = scheduler_handle.await {
-        eprintln!("Scheduler task error: {}", e);
+        error!("Scheduler task error: {}", e);
     }
 
-    println!("Shutdown complete");
+    info!("Shutdown complete");
 }

@@ -25,3 +25,8 @@ rdkafka = "0.23"
 task = { path = "../task" }
 # PostgreSQL support
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
+# Environment variables
+dotenvy = "0.15"
+# Logging
+log = "0.4"
+simplelog = "0.12"

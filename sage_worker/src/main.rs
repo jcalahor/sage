@@ -1,10 +1,13 @@
+use log::{error, info};
 use rdkafka::{
     ClientConfig, Message,
     consumer::{BaseConsumer, Consumer},
     producer::{FutureProducer, FutureRecord},
 };
 use serde::{Deserialize, Serialize};
+use simplelog::*;
 use std::error::Error;
+use std::fs::File;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,16 +33,19 @@ pub enum TaskResponseType {
 }
 
 fn create_kafka_producer() -> FutureProducer {
+    let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+        .expect("KAFKA_BOOTSTRAP_SERVERS must be set in environment or .env file");
+
     match ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
+        .set("bootstrap.servers", &bootstrap_servers)
         .create::<FutureProducer>()
     {
         Ok(producer) => {
-            println!("Kafka producer successfully created!");
+            info!("Kafka producer successfully created!");
             producer
         }
         Err(err) => {
-            println!("Failed to create Kafka producer: {}", err);
+            info!("Failed to create Kafka producer: {}", err);
             panic!("Kafka producer creation failed");
         }
     }
@@ -97,10 +103,13 @@ async fn submit_response(
     message: &SageMessage,
     response: TaskResponseType,
 ) -> Result<(), Box<dyn std::error::Error + Send>> {
+    let responses_topic = std::env::var("KAFKA_TOPIC_RESPONSES")
+        .expect("KAFKA_TOPIC_RESPONSES must be set in environment or .env file");
+
     // Pattern match on response type to extract inner data
     let response_payload = match &response {
         TaskResponseType::Prime(prime_response) => {
-            println!(
+            info!(
                 "{} Response (task_id: {}): {:?}",
                 message.task_name.clone(),
                 prime_response.task_id,
@@ -121,27 +130,27 @@ async fn submit_response(
     let payload = serde_json::to_string(&sage_message)
         .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
 
-    let record = FutureRecord::to("responses")
+    let record = FutureRecord::to(&responses_topic)
         .payload(&payload)
         .key(&message.task_name);
 
     match producer.send(record, 0).await {
         Ok(Ok(_)) => {
-            println!(
+            info!(
                 "Response sent successfully to topic 'responses': {}",
                 &payload
             );
             Ok(())
         }
         Ok(Err((e, _))) => {
-            eprintln!("Failed to send response: {:?}", e);
+            error!("Failed to send response: {:?}", e);
             Err(Box::new(io::Error::new(
                 io::ErrorKind::Other,
                 format!("Failed to send to Kafka: {:?}", e),
             )))
         }
         Err(e) => {
-            eprintln!("Kafka send future canceled: {:?}", e);
+            error!("Kafka send future canceled: {:?}", e);
             Err(Box::new(io::Error::new(
                 io::ErrorKind::Other,
                 format!("Kafka send canceled: {:?}", e),
@@ -155,6 +164,9 @@ async fn submit_error_response(
     message: &SageMessage,
     error: Box<dyn std::error::Error + Send>,
 ) -> Result<(), Box<dyn std::error::Error + Send>> {
+    let errors_topic = std::env::var("KAFKA_TOPIC_ERRORS")
+        .expect("KAFKA_TOPIC_ERRORS must be set in environment or .env file");
+
     let error_response = SageErrorResponse {
         task_id: message.task_id,
         task_name: message.task_name.clone(),
@@ -165,27 +177,27 @@ async fn submit_error_response(
     let payload = serde_json::to_string(&error_response)
         .map_err(|e| -> Box<dyn std::error::Error + Send> { Box::new(e) })?;
 
-    let record = FutureRecord::to("task-errors")
+    let record = FutureRecord::to(&errors_topic)
         .payload(&payload)
         .key(&message.task_name);
 
     match producer.send(record, 0).await {
         Ok(Ok(_)) => {
-            println!(
+            info!(
                 "Error response sent successfully to topic 'task-errors' for task_id: {}",
                 message.task_id
             );
             Ok(())
         }
         Ok(Err((e, _))) => {
-            eprintln!("Failed to send error response: {:?}", e);
+            error!("Failed to send error response: {:?}", e);
             Err(Box::new(io::Error::new(
                 io::ErrorKind::Other,
                 format!("Failed to send error to Kafka: {:?}", e),
             )))
         }
         Err(e) => {
-            eprintln!("Kafka error send future canceled: {:?}", e);
+            error!("Kafka error send future canceled: {:?}", e);
             Err(Box::new(io::Error::new(
                 io::ErrorKind::Other,
                 format!("Kafka error send canceled: {:?}", e),
@@ -196,6 +208,23 @@ async fn submit_error_response(
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+
+    // Initialize logging
+    let pid = std::process::id();
+    let log_file =
+        File::create(format!("sage_worker_{}.log", pid)).expect("Failed to create log file");
+
+    CombinedLogger::init(vec![WriteLogger::new(
+        LevelFilter::Info,
+        Config::default(),
+        log_file,
+    )])
+    .expect("Failed to initialize logger");
+
+    info!("Sage Worker starting (PID: {})", pid);
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::channel(100);
 
@@ -203,8 +232,8 @@ async fn main() {
     let consumer_handle = match start_consumer(tx, shutdown.clone()) {
         Ok(handle) => handle,
         Err(e) => {
-            eprintln!("Failed to start consumer: {}", e);
-            eprintln!("Shutting down...");
+            error!("Failed to start consumer: {}", e);
+            error!("Shutting down...");
             std::process::exit(1);
         }
     };
@@ -233,7 +262,7 @@ async fn main() {
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to unpack context: {}", e);
+                                    error!("Failed to unpack context: {}", e);
                                     Err((res, e))
                                 }
                             }
@@ -242,26 +271,26 @@ async fn main() {
 
                     match handle.await {
                         Ok(Ok((message, response))) => {
-                            println!(
+                            info!(
                                 "Task '{}' completed successfully (spawn_blocking)",
                                 message.task_name
                             );
                             if let Err(e) =
                                 submit_response(producer_clone, &message, response).await
                             {
-                                eprintln!("Failed to submit response: {}", e);
+                                error!("Failed to submit response: {}", e);
                             }
                         }
                         Ok(Err((message, error))) => {
-                            eprintln!("Task '{}' failed: {}", message.task_name, error);
+                            error!("Task '{}' failed: {}", message.task_name, error);
                             if let Err(e) =
                                 submit_error_response(producer_clone, &message, error).await
                             {
-                                eprintln!("Failed to submit error response: {}", e);
+                                error!("Failed to submit error response: {}", e);
                             }
                         }
                         Err(e) => {
-                            eprintln!("Blocking task panicked: {}", e);
+                            error!("Blocking task panicked: {}", e);
                         }
                     }
                 });
@@ -278,7 +307,7 @@ async fn main() {
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to unpack context: {}", e);
+                            error!("Failed to unpack context: {}", e);
                             Err((res, e))
                         }
                     }
@@ -286,23 +315,23 @@ async fn main() {
 
                 match handle.await {
                     Ok(Ok((message, response))) => {
-                        println!(
+                        info!(
                             "Task '{}' completed successfully (spawn)",
                             message.task_name
                         );
                         if let Err(e) = submit_response(producer_clone, &message, response).await {
-                            eprintln!("Failed to submit response: {}", e);
+                            error!("Failed to submit response: {}", e);
                         }
                     }
                     Ok(Err((message, error))) => {
-                        eprintln!("Task '{}' failed: {}", message.task_name, error);
+                        error!("Task '{}' failed: {}", message.task_name, error);
                         if let Err(e) = submit_error_response(producer_clone, &message, error).await
                         {
-                            eprintln!("Failed to submit error response: {}", e);
+                            error!("Failed to submit error response: {}", e);
                         }
                     }
                     Err(e) => {
-                        eprintln!("Async task panicked: {}", e);
+                        error!("Async task panicked: {}", e);
                     }
                 }
             }
@@ -311,42 +340,49 @@ async fn main() {
 
     // Run sample tasks once
     // Keep the application running to continue consuming messages
-    println!("Worker running, press Ctrl+C to exit...");
+    info!("Worker running, press Ctrl+C to exit...");
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to listen for Ctrl+C");
 
     // Signal shutdown
-    println!("Shutting down...");
+    info!("Shutting down...");
     shutdown.store(true, Ordering::Relaxed);
 
     // Wait for consumer to finish
     let _ = consumer_handle.await;
-    println!("Consumer stopped. Goodbye!");
+    info!("Consumer stopped. Goodbye!");
 }
 
 fn start_consumer(
     tx: Sender<SageMessage>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn Error>> {
+    let bootstrap_servers = std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+        .expect("KAFKA_BOOTSTRAP_SERVERS must be set in environment or .env file");
+    let group_id = std::env::var("KAFKA_WORKER_GROUP_ID")
+        .expect("KAFKA_WORKER_GROUP_ID must be set in environment or .env file");
+    let input_topic = std::env::var("KAFKA_TOPIC_INPUT")
+        .expect("KAFKA_TOPIC_INPUT must be set in environment or .env file");
+
     let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
-        .set("group.id", "andean-group")
+        .set("bootstrap.servers", &bootstrap_servers)
+        .set("group.id", &group_id)
         .set("auto.offset.reset", "earliest")
         .create()
         .map_err(|e| format!("Failed to create consumer: {}", e))?;
 
     consumer
-        .subscribe(&["input-readings"])
+        .subscribe(&[&input_topic])
         .map_err(|e| format!("Failed to subscribe to topic: {}", e))?;
 
-    println!("Kafka consumer started successfully, listening for messages...");
+    info!("Kafka consumer started successfully, listening for messages...");
 
     let handle = tokio::task::spawn_blocking(move || {
         loop {
             // Check shutdown signal
             if shutdown.load(Ordering::Relaxed) {
-                println!("Consumer received shutdown signal");
+                info!("Consumer received shutdown signal");
                 break;
             }
 
@@ -356,21 +392,21 @@ fn start_consumer(
                     if let Some(payload) = msg.payload() {
                         match serde_json::from_slice::<SageMessage>(payload) {
                             Ok(sage_msg) => {
-                                println!(
+                                info!(
                                     "Received SageMessage: task_name='{}', task_envelope='{}'",
                                     sage_msg.task_name, sage_msg.task_envelope
                                 );
                                 // Use try_send to avoid blocking the Kafka consumer
                                 if let Err(e) = tx.try_send(sage_msg) {
-                                    eprintln!("Failed to send message to channel: {:?}", e);
+                                    error!("Failed to send message to channel: {:?}", e);
                                 }
                             }
-                            Err(e) => eprintln!("Failed to deserialize SageMessage: {}", e),
+                            Err(e) => error!("Failed to deserialize SageMessage: {}", e),
                         }
                     }
                 }
                 Some(Err(e)) => {
-                    eprintln!("Error receiving message: {}", e);
+                    error!("Error receiving message: {}", e);
                 }
                 None => {
                     // Timeout, continue to check shutdown signal
