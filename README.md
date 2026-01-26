@@ -95,14 +95,40 @@ sage/
 
 ## Quick Start
 
-### 1. Start Kafka
+### Automated (Recommended)
+
+Use the provided scripts to start/stop all services with a single command:
+
+```bash
+# Start all services (Docker Compose + Server + Worker + UI)
+./bin/start_all_services.sh
+
+# Stop all services
+./bin/stop_all_services.sh
+```
+
+**Features:**
+- ✅ Automatic Kafka health checks with retry mechanism
+- ✅ Auto-restart Kafka if it fails during startup
+- ✅ Cleans up old containers to prevent conflicts
+- ✅ Displays all service PIDs and URLs
+- ✅ Comprehensive logging to `/log` directory
+- ✅ Graceful shutdown on Ctrl+C
+
+See [Service Management Scripts](#service-management-scripts) for details.
+
+### Manual Setup
+
+If you prefer manual control:
+
+#### 1. Start Kafka
 
 ```bash
 cd environment
 docker-compose up -d
 ```
 
-### 2. Run the Server (HTTP API)
+#### 2. Run the Server (HTTP API)
 
 ```bash
 cargo run --bin sage_server
@@ -110,7 +136,7 @@ cargo run --bin sage_server
 
 The server will start at `http://0.0.0.0:4000`
 
-### 3. Run Workers (Scale as needed)
+#### 3. Run Workers (Scale as needed)
 
 ```bash
 # Terminal 2 - Worker 1
@@ -123,7 +149,7 @@ cargo run --bin sage_worker
 cargo run --bin sage_worker
 ```
 
-### 4. Submit Tasks via HTTP API
+#### 4. Submit Tasks via HTTP API
 
 ```bash
 # Using curl
@@ -420,6 +446,118 @@ SELECT id, task_name, retry_count, error
 FROM tasks
 WHERE status = 'error';
 ```
+
+## Service Management Scripts
+
+Sage provides convenient shell scripts in the `bin/` directory for managing all services.
+
+### bin/start_all_services.sh
+
+Launches all Sage components in the correct order with health checks and auto-recovery.
+
+**Usage:**
+```bash
+./bin/start_all_services.sh
+```
+
+**What it does:**
+1. **Cleans up old containers** - Runs `docker-compose down` to prevent conflicts
+2. **Starts Docker Compose** - Launches Kafka, Zookeeper, PostgreSQL, Kafka UI
+3. **Kafka health monitoring** - Checks Kafka every 5 seconds (up to 60 seconds)
+   - If Kafka fails, automatically restarts ONLY the Kafka container
+   - Uses `docker ps` to verify container status
+4. **PostgreSQL health check** - Verifies database is ready
+5. **Starts Sage Server** - HTTP API at `http://localhost:4000`
+6. **Starts Sage Worker** - Task processor
+7. **Starts Sage UI** - Web interface at `http://localhost:5173`
+8. **Reports status** - Displays all PIDs, URLs, and log file locations
+
+**Features:**
+- ✅ **Kafka auto-restart** - Automatically restarts Kafka if it fails during startup
+- ✅ **Intelligent retry** - Retries Kafka health check every 5 seconds (configurable)
+- ✅ **Process tracking** - Displays PIDs for all spawned processes
+- ✅ **Comprehensive logging** - Logs saved to `/log` directory
+- ✅ **Graceful cleanup** - Ctrl+C stops all services gracefully
+- ✅ **Color-coded output** - Easy to read status messages
+
+**Configuration (edit script to customize):**
+```bash
+RETRY_INTERVAL=5        # Seconds between Kafka retry attempts
+MAX_KAFKA_RETRIES=12    # Maximum retry attempts (60 seconds total)
+```
+
+**Example output:**
+```
+╔═══════════════════════════════════════════════════════════╗
+║                   ALL SERVICES ARE UP!                    ║
+╚═══════════════════════════════════════════════════════════╝
+
+✓ Service Status Summary:
+
+  ✓ Docker Compose:  Running
+    - Kafka:           localhost:9092
+    - Kafka UI:        http://localhost:8080
+    - PostgreSQL:      localhost:5432
+    - Zookeeper:       localhost:2181
+
+  ✓ Sage Server:     http://localhost:4000 (PID: 12345)
+  ✓ Sage Worker:     Running (PID: 12346)
+  ✓ Sage UI:         http://localhost:5173 (PID: 12347)
+```
+
+### bin/stop_all_services.sh
+
+Stops all Sage services and Docker containers with verification.
+
+**Usage:**
+```bash
+./bin/stop_all_services.sh
+```
+
+**What it does:**
+1. **Stops Sage processes** - Kills sage_server, sage_worker, sage_ui, and cargo processes
+   - Attempts graceful shutdown with SIGTERM
+   - Force kills with SIGKILL after 1 second if needed
+2. **Stops Docker containers** - Runs `docker-compose down`
+   - Falls back to manual container stopping if docker-compose fails
+3. **Verifies cleanup** - Checks that all services stopped successfully
+
+**Features:**
+- ✅ **Graceful shutdown** - Tries SIGTERM first, then SIGKILL if necessary
+- ✅ **Complete cleanup** - Stops and removes all Docker containers
+- ✅ **Verification** - Confirms all services are stopped
+- ✅ **Fallback mode** - Manual container stopping if docker-compose fails
+- ✅ **Color-coded output** - Clear feedback on what was stopped
+
+**Example output:**
+```
+╔═══════════════════════════════════════════════════════════╗
+║          SAGE - Stopping All Services                     ║
+╚═══════════════════════════════════════════════════════════╝
+
+▶ Stopping Sage processes (Server, Worker, UI)...
+ℹ Found sage_server processes: 12345
+✓ Killed sage_server (PID: 12345)
+ℹ Found sage_worker processes: 12346
+✓ Killed sage_worker (PID: 12346)
+ℹ Found sage_ui processes: 12347
+✓ Killed sage_ui (PID: 12347)
+✓ All Sage processes stopped
+
+▶ Stopping Docker Compose containers...
+✓ Docker Compose containers stopped and removed
+
+▶ Verifying cleanup...
+✓ All services successfully stopped
+```
+
+### Log Files
+
+All services log to the `/log` directory:
+- `log/docker-compose.log` - Docker startup logs
+- `log/sage_server.log` - Server output
+- `log/sage_worker.log` - Worker output
+- `log/sage_ui.log` - UI development server output
 
 ## Components
 
