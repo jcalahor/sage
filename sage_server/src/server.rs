@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::api::scheduled_task_handler;
+use crate::api::job_handler;
 use crate::api::task_handler;
 use crate::types::AppState;
 
@@ -21,7 +21,7 @@ pub async fn build_server(producer: Arc<FutureProducer>, db_pool: PgPool) -> Rou
 
     Router::new()
         .merge(task_handler::create_routes())
-        .merge(scheduled_task_handler::create_routes())
+        .merge(job_handler::create_routes())
         .layer(cors)
         .with_state(app_state)
 }

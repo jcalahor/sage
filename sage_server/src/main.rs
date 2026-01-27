@@ -4,7 +4,7 @@ mod schedule_utils;
 mod server;
 mod types;
 
-use crate::db::{ScheduledTaskUpdate, TaskCreate, create_task, get_due_scheduled_tasks};
+use crate::db::{JobUpdate, TaskCreate, create_task, get_due_jobs};
 use chrono::Utc;
 use log::{error, info, warn};
 use rdkafka::config::ClientConfig;
@@ -80,16 +80,16 @@ async fn run_scheduler(
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
                 // Query for due tasks
                 info!("Checking if any tasks needs to run");
-                match get_due_scheduled_tasks(&db_pool).await {
+                match get_due_jobs(&db_pool).await {
                     Ok(due_tasks) => {
                         if !due_tasks.is_empty() {
                             info!("Found {} due scheduled tasks", due_tasks.len());
                         }
 
-                        for scheduled_task in due_tasks {
+                        for job in due_tasks {
                             info!(
                                 "Processing scheduled task: {} (ID: {})",
-                                scheduled_task.schedule_name, scheduled_task.id
+                                job.schedule_name, job.id
                             );
 
                             // Create task entry in tasks table
@@ -98,16 +98,16 @@ async fn run_scheduler(
                                 &db_pool,
                                 TaskCreate {
                                     id: task_id,
-                                    requestor_id: scheduled_task.requestor_id,
-                                    task_name: scheduled_task.task_name.clone(),
-                                    task_context: scheduled_task.task_context.clone(),
-                                    priority: Some(scheduled_task.priority),
-                                    max_retries: Some(scheduled_task.max_retries),
+                                    requestor_id: job.requestor_id,
+                                    task_name: job.task_name.clone(),
+                                    task_context: job.task_context.clone(),
+                                    priority: Some(job.priority),
+                                    max_retries: Some(job.max_retries),
                                 },
                             )
                             .await {
                                 Ok(task) => {
-                                    info!("Created task {} for scheduled task {}", task.id, scheduled_task.schedule_name);
+                                    info!("Created task {} for scheduled task {}", task.id, job.schedule_name);
 
                                     // Publish to Kafka
                                     if let Err(e) = publish_task_to_kafka(&producer, &task).await {
@@ -116,13 +116,13 @@ async fn run_scheduler(
                                     }
 
                                     // Calculate next run time
-                                    match calculate_next_run(&scheduled_task.cron_expression, &scheduled_task.timezone) {
+                                    match calculate_next_run(&job.cron_expression, &job.timezone) {
                                         Ok(next_run) => {
                                             // Update scheduled task
-                                            match db::update_scheduled_task(
+                                            match db::update_job(
                                                 &db_pool,
-                                                ScheduledTaskUpdate {
-                                                    id: scheduled_task.id,
+                                                JobUpdate {
+                                                    id: job.id,
                                                     task_context: None,
                                                     cron_expression: None,
                                                     timezone: None,
@@ -139,13 +139,13 @@ async fn run_scheduler(
                                                 Ok(_) => {
                                                     info!(
                                                         "Updated scheduled task {} - next run at {}",
-                                                        scheduled_task.schedule_name, next_run
+                                                        job.schedule_name, next_run
                                                     );
                                                 }
                                                 Err(e) => {
                                                     error!(
                                                         "Failed to update scheduled task {}: {}",
-                                                        scheduled_task.schedule_name, e
+                                                        job.schedule_name, e
                                                     );
                                                 }
                                             }
@@ -153,7 +153,7 @@ async fn run_scheduler(
                                         Err(e) => {
                                             error!(
                                                 "Failed to calculate next run for scheduled task '{}': {}",
-                                                scheduled_task.schedule_name, e
+                                                job.schedule_name, e
                                             );
                                         }
                                     }
@@ -161,7 +161,7 @@ async fn run_scheduler(
                                 Err(e) => {
                                     error!(
                                         "Failed to create task for scheduled task '{}': {}",
-                                        scheduled_task.schedule_name, e
+                                        job.schedule_name, e
                                     );
                                 }
                             }
@@ -179,28 +179,25 @@ async fn run_scheduler(
 }
 
 async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut scheduled_tasks = db::get_all_scheduled_tasks(&db_pool)
+    let mut jobs = db::get_all_jobs(&db_pool)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-    // TODO: Process scheduled_tasks and update their next run times
-    info!("Retrieved {} scheduled tasks", scheduled_tasks.len());
+    // TODO: Process jobs and update their next run times
+    info!("Retrieved {} scheduled tasks", jobs.len());
 
-    for scheduled_task in &mut scheduled_tasks {
+    for job in &mut jobs {
         // TODO: Calculate next_run_at and update the scheduled task
-        info!(
-            "Processing scheduled task: {}",
-            scheduled_task.schedule_name
-        );
+        info!("Processing scheduled task: {}", job.schedule_name);
 
-        match calculate_next_run(&scheduled_task.cron_expression, &scheduled_task.timezone) {
+        match calculate_next_run(&job.cron_expression, &job.timezone) {
             Ok(next_run_time) => {
-                scheduled_task.next_run_at = next_run_time;
+                job.next_run_at = next_run_time;
 
-                db::update_scheduled_task(
+                db::update_job(
                     &db_pool,
-                    ScheduledTaskUpdate {
-                        id: scheduled_task.id,
+                    JobUpdate {
+                        id: job.id,
                         task_context: None,
                         cron_expression: None,
                         timezone: None,
@@ -218,7 +215,7 @@ async fn refresh_tasks_schedules(db_pool: PgPool) -> Result<(), Box<dyn std::err
             Err(e) => {
                 error!(
                     "Failed to calculate next run for scheduled task '{}': {}",
-                    scheduled_task.schedule_name, e
+                    job.schedule_name, e
                 );
             }
         }

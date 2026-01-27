@@ -45,7 +45,7 @@ pub struct TaskUpdate {
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct ScheduledTask {
+pub struct Job {
     pub id: Uuid,
     pub requestor_id: i64,
     pub schedule_name: String,
@@ -65,7 +65,7 @@ pub struct ScheduledTask {
 }
 
 #[derive(Debug, Clone)]
-pub struct ScheduledTaskCreate {
+pub struct JobCreate {
     pub requestor_id: i64,
     pub schedule_name: String,
     pub task_name: String,
@@ -81,7 +81,7 @@ pub struct ScheduledTaskCreate {
 }
 
 #[derive(Debug, Clone)]
-pub struct ScheduledTaskUpdate {
+pub struct JobUpdate {
     pub id: Uuid,
     pub task_context: Option<String>,
     pub cron_expression: Option<String>,
@@ -172,10 +172,10 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    // Create scheduled_tasks table
+    // Create jobs table
     sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        CREATE TABLE IF NOT EXISTS jobs (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             requestor_id BIGINT NOT NULL,
             schedule_name VARCHAR(255) NOT NULL,
@@ -203,8 +203,8 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Create index on next_run_at for efficient scheduling queries
     sqlx::query(
         r#"
-        CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_run 
-            ON scheduled_tasks(next_run_at) 
+        CREATE INDEX IF NOT EXISTS idx_jobs_next_run 
+            ON jobs(next_run_at) 
             WHERE enabled = true
         "#,
     )
@@ -214,8 +214,8 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Create index on requestor_id for scheduled tasks
     sqlx::query(
         r#"
-        CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_requestor 
-            ON scheduled_tasks(requestor_id)
+        CREATE INDEX IF NOT EXISTS idx_jobs_requestor 
+            ON jobs(requestor_id)
         "#,
     )
     .execute(pool)
@@ -224,19 +224,19 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     // Create index on enabled for scheduled tasks
     sqlx::query(
         r#"
-        CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_enabled 
-            ON scheduled_tasks(enabled)
+        CREATE INDEX IF NOT EXISTS idx_jobs_enabled 
+            ON jobs(enabled)
         "#,
     )
     .execute(pool)
     .await?;
 
-    // Create scheduled_task_history table
+    // Create job_history table
     sqlx::query(
         r#"
-        CREATE TABLE IF NOT EXISTS scheduled_task_history (
+        CREATE TABLE IF NOT EXISTS job_history (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            scheduled_task_id UUID NOT NULL,
+            job_id UUID NOT NULL,
             task_id UUID,
             executed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             status VARCHAR(50) NOT NULL,
@@ -249,18 +249,18 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    // Add foreign key constraint for scheduled_task_history
+    // Add foreign key constraint for job_history
     sqlx::query(
         r#"
         DO $$
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint 
-                WHERE conname = 'fk_scheduled_task_history_scheduled_task'
+                WHERE conname = 'fk_job_history_job'
             ) THEN
-                ALTER TABLE scheduled_task_history 
-                ADD CONSTRAINT fk_scheduled_task_history_scheduled_task 
-                FOREIGN KEY (scheduled_task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE;
+                ALTER TABLE job_history 
+                ADD CONSTRAINT fk_job_history_job 
+                FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE;
             END IF;
         END $$;
         "#,
@@ -268,17 +268,17 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    // Add foreign key constraint for scheduled_task_history to tasks
+    // Add foreign key constraint for job_history to tasks
     sqlx::query(
         r#"
         DO $$
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint 
-                WHERE conname = 'fk_scheduled_task_history_task'
+                WHERE conname = 'fk_job_history_task'
             ) THEN
-                ALTER TABLE scheduled_task_history 
-                ADD CONSTRAINT fk_scheduled_task_history_task 
+                ALTER TABLE job_history 
+                ADD CONSTRAINT fk_job_history_task 
                 FOREIGN KEY (task_id) REFERENCES tasks(id);
             END IF;
         END $$;
@@ -287,11 +287,11 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    // Create index on scheduled_task_id for history queries
+    // Create index on job_id for history queries
     sqlx::query(
         r#"
-        CREATE INDEX IF NOT EXISTS idx_scheduled_task_history_scheduled_task 
-            ON scheduled_task_history(scheduled_task_id, executed_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_job_history_job 
+            ON job_history(job_id, executed_at DESC)
         "#,
     )
     .execute(pool)
@@ -457,13 +457,10 @@ pub async fn delete_task(pool: &PgPool, task_id: Uuid) -> Result<bool, sqlx::Err
 
 // Scheduled Task CRUD operations
 
-pub async fn create_scheduled_task(
-    pool: &PgPool,
-    schedule: ScheduledTaskCreate,
-) -> Result<ScheduledTask, sqlx::Error> {
-    let row = sqlx::query_as::<_, ScheduledTask>(
+pub async fn create_job(pool: &PgPool, schedule: JobCreate) -> Result<Job, sqlx::Error> {
+    let row = sqlx::query_as::<_, Job>(
         r#"
-        INSERT INTO scheduled_tasks (
+        INSERT INTO jobs (
             requestor_id, schedule_name, task_name, task_context, cron_expression,
             timezone, enabled, priority, max_retries, next_run_at, created_by, metadata
         )
@@ -491,16 +488,13 @@ pub async fn create_scheduled_task(
     Ok(row)
 }
 
-pub async fn get_scheduled_task_by_id(
-    pool: &PgPool,
-    schedule_id: Uuid,
-) -> Result<Option<ScheduledTask>, sqlx::Error> {
-    let schedule = sqlx::query_as::<_, ScheduledTask>(
+pub async fn get_job_by_id(pool: &PgPool, schedule_id: Uuid) -> Result<Option<Job>, sqlx::Error> {
+    let schedule = sqlx::query_as::<_, Job>(
         r#"
         SELECT id, requestor_id, schedule_name, task_name, task_context, cron_expression,
                timezone, enabled, priority, max_retries, last_run_at, next_run_at,
                created_at, updated_at, created_by, metadata
-        FROM scheduled_tasks
+        FROM jobs
         WHERE id = $1
         "#,
     )
@@ -511,16 +505,16 @@ pub async fn get_scheduled_task_by_id(
     Ok(schedule)
 }
 
-pub async fn get_scheduled_tasks_by_requestor(
+pub async fn get_jobs_by_requestor(
     pool: &PgPool,
     requestor_id: i64,
-) -> Result<Vec<ScheduledTask>, sqlx::Error> {
-    let schedules = sqlx::query_as::<_, ScheduledTask>(
+) -> Result<Vec<Job>, sqlx::Error> {
+    let schedules = sqlx::query_as::<_, Job>(
         r#"
         SELECT id, requestor_id, schedule_name, task_name, task_context, cron_expression,
                timezone, enabled, priority, max_retries, last_run_at, next_run_at,
                created_at, updated_at, created_by, metadata
-        FROM scheduled_tasks
+        FROM jobs
         WHERE requestor_id = $1
         ORDER BY created_at DESC
         "#,
@@ -532,13 +526,13 @@ pub async fn get_scheduled_tasks_by_requestor(
     Ok(schedules)
 }
 
-pub async fn get_all_scheduled_tasks(pool: &PgPool) -> Result<Vec<ScheduledTask>, sqlx::Error> {
-    let schedules = sqlx::query_as::<_, ScheduledTask>(
+pub async fn get_all_jobs(pool: &PgPool) -> Result<Vec<Job>, sqlx::Error> {
+    let schedules = sqlx::query_as::<_, Job>(
         r#"
         SELECT id, requestor_id, schedule_name, task_name, task_context, cron_expression,
                timezone, enabled, priority, max_retries, last_run_at, next_run_at,
                created_at, updated_at, created_by, metadata
-        FROM scheduled_tasks
+        FROM jobs
         ORDER BY next_run_at ASC
         "#,
     )
@@ -548,13 +542,13 @@ pub async fn get_all_scheduled_tasks(pool: &PgPool) -> Result<Vec<ScheduledTask>
     Ok(schedules)
 }
 
-pub async fn get_due_scheduled_tasks(pool: &PgPool) -> Result<Vec<ScheduledTask>, sqlx::Error> {
-    let schedules = sqlx::query_as::<_, ScheduledTask>(
+pub async fn get_due_jobs(pool: &PgPool) -> Result<Vec<Job>, sqlx::Error> {
+    let schedules = sqlx::query_as::<_, Job>(
         r#"
         SELECT id, requestor_id, schedule_name, task_name, task_context, cron_expression,
                timezone, enabled, priority, max_retries, last_run_at, next_run_at,
                created_at, updated_at, created_by, metadata
-        FROM scheduled_tasks
+        FROM jobs
         WHERE enabled = true AND next_run_at <= CURRENT_TIMESTAMP
         ORDER BY priority DESC, next_run_at ASC
         "#,
@@ -565,11 +559,8 @@ pub async fn get_due_scheduled_tasks(pool: &PgPool) -> Result<Vec<ScheduledTask>
     Ok(schedules)
 }
 
-pub async fn update_scheduled_task(
-    pool: &PgPool,
-    schedule_update: ScheduledTaskUpdate,
-) -> Result<ScheduledTask, sqlx::Error> {
-    let mut query = String::from("UPDATE scheduled_tasks SET updated_at = CURRENT_TIMESTAMP");
+pub async fn update_job(pool: &PgPool, schedule_update: JobUpdate) -> Result<Job, sqlx::Error> {
+    let mut query = String::from("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP");
     let mut updates = Vec::new();
     let mut param_count = 1;
 
@@ -624,7 +615,7 @@ pub async fn update_scheduled_task(
         param_count
     ));
 
-    let mut sqlx_query = sqlx::query_as::<_, ScheduledTask>(&query);
+    let mut sqlx_query = sqlx::query_as::<_, Job>(&query);
 
     if let Some(task_context) = schedule_update.task_context {
         sqlx_query = sqlx_query.bind(task_context);
@@ -664,10 +655,10 @@ pub async fn update_scheduled_task(
     Ok(row)
 }
 
-pub async fn delete_scheduled_task(pool: &PgPool, schedule_id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn delete_job(pool: &PgPool, schedule_id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         r#"
-        DELETE FROM scheduled_tasks
+        DELETE FROM jobs
         WHERE id = $1
         "#,
     )
