@@ -2,6 +2,7 @@ import { useState } from 'react'
 import './App.css'
 import TaskSubmission from './TaskSubmission'
 import JobsList from './JobsList'
+import TasksList from './TasksList'
 
 function App() {
   const [activeTab, setActiveTab] = useState(null)
@@ -15,10 +16,16 @@ function App() {
       
       <div className="tabs">
         <button 
+          className={`tab-button ${activeTab === 'submission' ? 'active' : ''}`}
+          onClick={() => setActiveTab('submission')}
+        >
+          Task Submission
+        </button>
+        <button 
           className={`tab-button ${activeTab === 'tasks' ? 'active' : ''}`}
           onClick={() => setActiveTab('tasks')}
         >
-          Task Submission
+          Tasks
         </button>
         <button 
           className={`tab-button ${activeTab === 'schedules' ? 'active' : ''}`}
@@ -35,7 +42,8 @@ function App() {
             <p>Please select a tab above to get started.</p>
           </div>
         )}
-        {activeTab === 'tasks' && <TaskSubmission />}
+        {activeTab === 'submission' && <TaskSubmission />}
+        {activeTab === 'tasks' && <TasksList />}
         {activeTab === 'schedules' && <JobsList />}
       </main>
     </div>

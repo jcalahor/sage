@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
 use log::info;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
     pub requestor_id: i64,
@@ -432,7 +433,7 @@ pub async fn get_all_tasks(pool: &PgPool) -> Result<Vec<Task>, sqlx::Error> {
         SELECT id, requestor_id, task_name, task_context, status, priority, retry_count, max_retries,
                created_at, started_at, completed_at, result, error, worker_id
         FROM tasks
-        ORDER BY priority DESC, created_at ASC
+        ORDER BY created_at DESC
         "#,
     )
     .fetch_all(pool)
