@@ -203,6 +203,109 @@
   color: #721c24;
 }
 
+.status-badge.status-submitted {
+  background-color: #cfe2ff;
+  color: #084298;
+}
+
+.status-badge.status-completed {
+  background-color: #d1e7dd;
+  color: #0f5132;
+}
+
+.status-badge.status-error {
+  background-color: #f8d7da;
+  color: #842029;
+}
+
+.status-badge.status-skipped {
+  background-color: #fff3cd;
+  color: #664d03;
+}
+
+.history-btn {
+  background-color: #6c757d;
+  color: white;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: background-color 0.2s;
+}
+
+.history-btn:hover {
+  background-color: #5a6268;
+}
+
+.history-row {
+  background-color: #f8f9fa;
+}
+
+.history-row td {
+  padding: 0 !important;
+}
+
+.history-container {
+  padding: 1.5rem;
+  background-color: #ffffff;
+  border: 2px solid #dee2e6;
+  border-radius: 8px;
+  margin: 0.5rem;
+}
+
+.history-container h4 {
+  margin: 0 0 1rem 0;
+  color: #495057;
+  font-size: 1.1rem;
+  text-align: left;
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-top: 1rem;
+}
+
+.history-table thead {
+  background-color: #e9ecef;
+  border-bottom: 2px solid #dee2e6;
+}
+
+.history-table th {
+  padding: 0.75rem;
+  text-align: center;
+  font-weight: 600;
+  color: #495057;
+}
+
+.history-table tbody tr {
+  border-bottom: 1px solid #dee2e6;
+}
+
+.history-table tbody tr:last-child {
+  border-bottom: none;
+}
+
+.history-table td {
+  padding: 0.75rem;
+  text-align: center;
+  color: #333;
+}
+
+.history-table td.text-left {
+  text-align: left;
+}
+
+.history-table .error-message {
+  font-size: 0.85rem;
+  color: #721c24;
+  max-width: 400px;
+  word-wrap: break-word;
+}
+
 /* Responsive design */
 @media (max-width: 768px) {
   .controls {

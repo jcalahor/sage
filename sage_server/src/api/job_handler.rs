@@ -8,7 +8,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::db::{JobCreate, JobUpdate};
-use crate::db::{create_job, get_all_jobs, get_job_by_id, get_jobs_by_requestor, update_job};
+use crate::db::{
+    create_job, get_all_jobs, get_job_by_id, get_job_history, get_jobs_by_requestor, update_job,
+};
 use crate::schedule_utils::{calculate_next_run, validate_cron_expression};
 use crate::types::AppState;
 
@@ -119,6 +121,28 @@ pub struct ListSchedulesResponse {
 pub struct ErrorResponse {
     pub status: bool,
     pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GetJobHistoryRequest {
+    pub job_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct JobHistoryItem {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub task_id: Option<Uuid>,
+    pub executed_at: DateTime<Utc>,
+    pub status: String,
+    pub error_message: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GetJobHistoryResponse {
+    pub status: bool,
+    pub count: usize,
+    pub history: Vec<JobHistoryItem>,
 }
 
 async fn create_schedule(
@@ -438,10 +462,54 @@ async fn toggle_schedule_status(
     }
 }
 
+async fn get_history(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<GetJobHistoryRequest>,
+) -> impl IntoResponse {
+    match get_job_history(&state.db_pool, payload.job_id).await {
+        Ok(history) => {
+            let history_items: Vec<JobHistoryItem> = history
+                .into_iter()
+                .map(|h| JobHistoryItem {
+                    id: h.id,
+                    job_id: h.job_id,
+                    task_id: h.task_id,
+                    executed_at: h.executed_at,
+                    status: h.status,
+                    error_message: h.error_message,
+                })
+                .collect();
+
+            let count = history_items.len();
+            info!(
+                "Retrieved {} history record(s) for job {}",
+                count, payload.job_id
+            );
+
+            let response = GetJobHistoryResponse {
+                status: true,
+                count,
+                history: history_items,
+            };
+
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => {
+            error!("Failed to retrieve job history from database: {}", e);
+            let error_response = ErrorResponse {
+                status: false,
+                error: format!("Database error: {}", e),
+            };
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
+        }
+    }
+}
+
 pub fn create_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/jobs/v1/create", post(create_schedule))
         .route("/jobs/v1/edit", post(edit_schedule))
         .route("/jobs/v1/toggle-status", post(toggle_schedule_status))
         .route("/jobs/v1/list", post(list_jobs))
+        .route("/jobs/v1/history", post(get_history))
 }

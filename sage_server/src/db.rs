@@ -96,6 +96,16 @@ pub struct JobUpdate {
     pub metadata: Option<JsonValue>,
 }
 
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct JobHistory {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub task_id: Option<Uuid>,
+    pub executed_at: DateTime<Utc>,
+    pub status: String,
+    pub error_message: Option<String>,
+}
+
 pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
         .max_connections(5)
@@ -243,7 +253,7 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
             status VARCHAR(50) NOT NULL,
             error_message TEXT,
             CONSTRAINT check_history_status_values 
-                CHECK (status IN ('submitted', 'skipped', 'error'))
+                CHECK (status IN ('submitted', 'completed', 'skipped', 'error'))
         )
         "#,
     )
@@ -668,4 +678,46 @@ pub async fn delete_job(pool: &PgPool, schedule_id: Uuid) -> Result<bool, sqlx::
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+// Job History operations
+
+pub async fn add_job_history_record(
+    pool: &PgPool,
+    job_id: Uuid,
+    task_id: Option<Uuid>,
+    status: String,
+    error_message: Option<String>,
+) -> Result<JobHistory, sqlx::Error> {
+    let row = sqlx::query_as::<_, JobHistory>(
+        r#"
+        INSERT INTO job_history (job_id, task_id, status, error_message)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, job_id, task_id, executed_at, status, error_message
+        "#,
+    )
+    .bind(job_id)
+    .bind(task_id)
+    .bind(status)
+    .bind(error_message)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
+}
+
+pub async fn get_job_history(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobHistory>, sqlx::Error> {
+    let history = sqlx::query_as::<_, JobHistory>(
+        r#"
+        SELECT id, job_id, task_id, executed_at, status, error_message
+        FROM job_history
+        WHERE job_id = $1
+        ORDER BY executed_at DESC
+        "#,
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(history)
 }

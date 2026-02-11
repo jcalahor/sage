@@ -4,7 +4,7 @@ mod schedule_utils;
 mod server;
 mod types;
 
-use crate::db::{JobUpdate, TaskCreate, create_task, get_due_jobs};
+use crate::db::{JobUpdate, TaskCreate, add_job_history_record, create_task, get_due_jobs};
 use chrono::Utc;
 use log::{error, info, warn};
 use rdkafka::config::ClientConfig;
@@ -109,9 +109,43 @@ async fn run_scheduler(
                                 Ok(task) => {
                                     info!("Created task {} for scheduled task {}", task.id, job.schedule_name);
 
-                                    // Publish to Kafka
-                                    if let Err(e) = publish_task_to_kafka(&producer, &task).await {
-                                        error!("Failed to publish task {} to Kafka: {}", task.id, e);
+                                    // Publish to Kafka and immediately extract result
+                                    let task_id_for_history = task.id;
+                                    let job_id_for_history = job.id;
+
+                                    let publish_succeeded;
+                                    let publish_error_msg;
+                                    {
+                                        let result = publish_task_to_kafka(&producer, &task).await;
+                                        publish_succeeded = result.is_ok();
+                                        publish_error_msg = result.err().map(|e| format!("Failed to publish to Kafka: {}", e));
+                                    }
+
+                                    if publish_succeeded {
+                                        // Record successful submission in job history
+                                        if let Err(e) = add_job_history_record(
+                                            &db_pool,
+                                            job_id_for_history,
+                                            Some(task_id_for_history),
+                                            "submitted".to_string(),
+                                            None,
+                                        ).await {
+                                            error!("Failed to record job history for job {}: {}", job_id_for_history, e);
+                                        }
+                                    } else {
+                                        let error_msg = publish_error_msg.unwrap();
+                                        error!("Failed to publish task {} to Kafka: {}", task_id_for_history, error_msg);
+
+                                        // Record error in job history
+                                        if let Err(hist_err) = add_job_history_record(
+                                            &db_pool,
+                                            job_id_for_history,
+                                            Some(task_id_for_history),
+                                            "error".to_string(),
+                                            Some(error_msg),
+                                        ).await {
+                                            error!("Failed to record job history error for job {}: {}", job_id_for_history, hist_err);
+                                        }
                                         continue;
                                     }
 
@@ -159,10 +193,24 @@ async fn run_scheduler(
                                     }
                                 }
                                 Err(e) => {
+                                    let error_msg = format!("Failed to create task: {}", e);
+                                    let schedule_name = job.schedule_name.clone();
+                                    drop(e); // Drop error before await
                                     error!(
                                         "Failed to create task for scheduled task '{}': {}",
-                                        job.schedule_name, e
+                                        schedule_name, error_msg
                                     );
+
+                                    // Record error in job history
+                                    if let Err(hist_err) = add_job_history_record(
+                                        &db_pool,
+                                        job.id,
+                                        None,
+                                        "error".to_string(),
+                                        Some(error_msg),
+                                    ).await {
+                                        error!("Failed to record job history error for job {}: {}", job.id, hist_err);
+                                    }
                                 }
                             }
                         }
@@ -312,6 +360,33 @@ async fn process_responses(
                                     match db::update_task(&db_pool, task_update).await {
                                         Ok(task) => {
                                             info!("Task {} updated successfully with status: {}", task.id, task.status);
+
+                                            // Find the job that created this task and record completion in job history
+                                            match sqlx::query_scalar::<_, uuid::Uuid>(
+                                                "SELECT job_id FROM job_history WHERE task_id = $1 AND status = 'submitted' LIMIT 1"
+                                            )
+                                            .bind(task.id)
+                                            .fetch_optional(&db_pool)
+                                            .await {
+                                                Ok(Some(job_id)) => {
+                                                    // Record task completion in job history
+                                                    if let Err(e) = add_job_history_record(
+                                                        &db_pool,
+                                                        job_id,
+                                                        Some(task.id),
+                                                        "completed".to_string(),
+                                                        None,
+                                                    ).await {
+                                                        error!("Failed to record job completion history for job {}: {}", job_id, e);
+                                                    }
+                                                }
+                                                Ok(None) => {
+                                                    // Task not created by a job (manually submitted)
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to query job_history for task {}: {}", task.id, e);
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             error!("Failed to update task {}: {}", sage_msg.task_id, e);
