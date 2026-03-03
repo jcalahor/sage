@@ -606,11 +606,12 @@ A background worker that:
 - [x] PostgreSQL result backend with task persistence
 - [x] Task status constraints (pending, completed, error)
 - [x] Response processing and database updates
-- [x] **Task retry mechanism with configurable max attempts**
-- [ ] Priority queues
-- [ ] Task scheduling (cron-like)
+- [x] Task retry mechanism with configurable max attempts
+- [x] Priority queues
+- [x] Task scheduling (cron-like with timezone support)
+- [x] Job history tracking
+- [x] Web dashboard (Sage UI with React + Vite)
 - [ ] Monitoring and metrics
-- [ ] Web dashboard
 - [ ] Task chains and workflows
 - [ ] WebSocket support for real-time updates
 
@@ -638,9 +639,35 @@ Contributions welcome! This project demonstrates:
 
 MIT / Apache-2.0 (choose your preference)
 
+## Web Dashboard - Sage UI
+
+Sage includes a modern React-based web interface built with Vite for managing tasks and schedules.
+
+### Features
+
+- **Task Submission**: Submit new tasks via a user-friendly form
+- **Task List**: View all tasks with their status, results, and execution details
+- **Jobs Management**: Create, view, and manage scheduled tasks (cron-based)
+- **Job History**: Track execution history for each scheduled job
+- **Real-time Updates**: Refresh data to see latest task and job statuses
+
+### Running the UI
+
+```bash
+cd sage_ui
+npm install
+npm run dev
+```
+
+The UI will be available at `http://localhost:5173`
+
+Or use the automated start script: `./bin/start_all_services.sh`
+
 ## API Documentation
 
-### POST /tasks/v1/start
+### Task Endpoints
+
+#### POST /tasks/v1/start
 
 Submit a new task for processing.
 
@@ -649,7 +676,9 @@ Submit a new task for processing.
 {
   "requestor_id": 12345,
   "task_name": "PrimeTask",
-  "task_context": "{\"limit\": 10000}"
+  "task_envelope": "{\"limit\": 10000}",
+  "priority": 0,
+  "max_retries": 3
 }
 ```
 
@@ -658,6 +687,136 @@ Submit a new task for processing.
 {
   "status": true,
   "id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+#### GET /tasks/v1/list
+
+List all tasks or tasks for a specific requestor.
+
+**Query Parameters:**
+- `requestor_id` (optional): Filter tasks by requestor ID
+
+**Response:**
+```json
+{
+  "status": true,
+  "count": 10,
+  "tasks": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "requestor_id": 12345,
+      "task_name": "PrimeTask",
+      "task_context": "{\"limit\": 10000}",
+      "status": "completed",
+      "priority": 0,
+      "retry_count": 0,
+      "max_retries": 3,
+      "created_at": "2026-03-03T18:00:00Z",
+      "started_at": "2026-03-03T18:00:01Z",
+      "completed_at": "2026-03-03T18:00:05Z",
+      "result": {"prime_founds": 4669},
+      "error": null,
+      "worker_id": "worker-1"
+    }
+  ]
+}
+```
+
+### Job (Scheduled Task) Endpoints
+
+#### POST /jobs/v1/create
+
+Create a new scheduled task with cron expression.
+
+**Request Body:**
+```json
+{
+  "requestor_id": 12345,
+  "schedule_name": "daily_prime_calculation",
+  "task_name": "PrimeTask",
+  "task_context": "{\"limit\": 50000}",
+  "cron_expression": "0 2 * * *",
+  "timezone": "America/New_York",
+  "enabled": true,
+  "priority": 0,
+  "max_retries": 3,
+  "created_by": "admin",
+  "metadata": {"description": "Daily prime number calculation"}
+}
+```
+
+**Response:**
+```json
+{
+  "status": true,
+  "id": "650e8400-e29b-41d4-a716-446655440000",
+  "next_run_at": "2026-03-04T02:00:00Z"
+}
+```
+
+#### POST /jobs/v1/list
+
+List all scheduled tasks or filter by requestor.
+
+**Request Body:**
+```json
+{
+  "requestor_id": 12345
+}
+```
+
+#### POST /jobs/v1/edit
+
+Update an existing scheduled task.
+
+**Request Body:**
+```json
+{
+  "id": "650e8400-e29b-41d4-a716-446655440000",
+  "cron_expression": "0 3 * * *",
+  "enabled": true
+}
+```
+
+#### POST /jobs/v1/toggle-status
+
+Enable or disable a scheduled task.
+
+**Request Body:**
+```json
+{
+  "id": "650e8400-e29b-41d4-a716-446655440000",
+  "enabled": false
+}
+```
+
+#### POST /jobs/v1/history
+
+Get execution history for a scheduled task.
+
+**Request Body:**
+```json
+{
+  "job_id": "650e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Response:**
+```json
+{
+  "status": true,
+  "count": 5,
+  "history": [
+    {
+      "id": "750e8400-e29b-41d4-a716-446655440000",
+      "job_id": "650e8400-e29b-41d4-a716-446655440000",
+      "task_id": "550e8400-e29b-41d4-a716-446655440000",
+      "executed_at": "2026-03-03T02:00:00Z",
+      "status": "completed",
+      "error_message": null
+    }
+  ]
 }
 ```
 

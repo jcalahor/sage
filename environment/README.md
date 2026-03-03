@@ -7,6 +7,7 @@ This Docker Compose setup provides a complete Kafka cluster for local developmen
 - **Zookeeper**: Coordination service for Kafka (port 2181)
 - **Kafka**: Message broker (ports 9092 for external access, 9093 for internal)
 - **Kafka UI**: Web interface for managing and monitoring Kafka (port 8080)
+- **PostgreSQL**: Database for task and job persistence (port 5432)
 
 ## Prerequisites
 
@@ -31,6 +32,10 @@ docker-compose down
 - **Kafka Broker**: `localhost:9092`
 - **Kafka UI**: http://localhost:8080
 - **Zookeeper**: `localhost:2181`
+- **PostgreSQL**: `localhost:5432`
+  - Database: `sage_db`
+  - User: `sage`
+  - Password: `sage_password`
 
 ## Connecting from Applications
 
@@ -90,8 +95,24 @@ docker exec -it kafka kafka-console-consumer \
   --from-beginning
 ```
 
+## PostgreSQL Connection
+
+From the host machine:
+```bash
+psql -h localhost -p 5432 -U sage -d sage_db
+# Password: sage_password
+```
+
+From Sage Server (configured in .env):
+```
+DATABASE_URL=postgres://sage:sage_password@localhost:5432/sage_db
+```
+
 ## Cleanup
 
 To remove all containers and volumes:
 ```bash
 docker-compose down -v
+```
+
+This will delete all data including PostgreSQL database contents.
